@@ -9,64 +9,60 @@
 #include "src/objects/map.h"
 #include "src/objects/objects.h"
 #include "src/objects/visitors.h"
+#include "torque-generated/field-offsets.h"
 
 namespace v8 {
 namespace internal {
 
-#define TYPED_VISITOR_ID_LIST(V)       \
-  V(AllocationSite)                    \
-  V(BigInt)                            \
-  V(ByteArray)                         \
-  V(BytecodeArray)                     \
-  V(Cell)                              \
-  V(Code)                              \
-  V(CodeDataContainer)                 \
-  V(ConsString)                        \
-  V(Context)                           \
-  V(DataHandler)                       \
-  V(DescriptorArray)                   \
-  V(EmbedderDataArray)                 \
-  V(EphemeronHashTable)                \
-  V(FeedbackCell)                      \
-  V(FeedbackMetadata)                  \
-  V(FeedbackVector)                    \
-  V(FixedArray)                        \
-  V(FixedDoubleArray)                  \
-  V(JSArrayBuffer)                     \
-  V(JSDataView)                        \
-  V(JSFunction)                        \
-  V(JSObject)                          \
-  V(JSTypedArray)                      \
-  V(WeakCell)                          \
-  V(JSWeakCollection)                  \
-  V(JSWeakRef)                         \
-  V(Map)                               \
-  V(NativeContext)                     \
-  V(Oddball)                           \
-  V(PreparseData)                      \
-  V(PropertyArray)                     \
-  V(PropertyCell)                      \
-  V(PrototypeInfo)                     \
-  V(SeqOneByteString)                  \
-  V(SeqTwoByteString)                  \
-  V(SharedFunctionInfo)                \
-  V(SlicedString)                      \
-  V(SmallOrderedHashMap)               \
-  V(SmallOrderedHashSet)               \
-  V(SmallOrderedNameDictionary)        \
-  V(SourceTextModule)                  \
-  V(Symbol)                            \
-  V(SyntheticModule)                   \
-  V(ThinString)                        \
-  V(TransitionArray)                   \
-  V(UncompiledDataWithoutPreparseData) \
-  V(UncompiledDataWithPreparseData)    \
-  V(WasmCapiFunctionData)              \
-  V(WasmIndirectFunctionTable)         \
-  V(WasmInstanceObject)
+#define TYPED_VISITOR_ID_LIST(V)        \
+  V(AllocationSite)                     \
+  V(BigInt)                             \
+  V(ByteArray)                          \
+  V(BytecodeArray)                      \
+  V(Cell)                               \
+  V(Code)                               \
+  V(CodeDataContainer)                  \
+  V(CoverageInfo)                       \
+  V(DataHandler)                        \
+  V(EmbedderDataArray)                  \
+  V(EphemeronHashTable)                 \
+  V(FeedbackCell)                       \
+  V(FeedbackMetadata)                   \
+  V(FixedDoubleArray)                   \
+  V(JSArrayBuffer)                      \
+  V(JSDataView)                         \
+  V(JSFunction)                         \
+  V(JSObject)                           \
+  V(JSTypedArray)                       \
+  V(WeakCell)                           \
+  V(JSWeakCollection)                   \
+  V(JSWeakRef)                          \
+  V(Map)                                \
+  V(NativeContext)                      \
+  V(PreparseData)                       \
+  V(PropertyArray)                      \
+  V(PropertyCell)                       \
+  V(PrototypeInfo)                      \
+  V(SmallOrderedHashMap)                \
+  V(SmallOrderedHashSet)                \
+  V(SmallOrderedNameDictionary)         \
+  V(SourceTextModule)                   \
+  V(SwissNameDictionary)                \
+  V(Symbol)                             \
+  V(SyntheticModule)                    \
+  V(TransitionArray)                    \
+  IF_WASM(V, WasmArray)                 \
+  IF_WASM(V, WasmExportedFunctionData)  \
+  IF_WASM(V, WasmFunctionData)          \
+  IF_WASM(V, WasmIndirectFunctionTable) \
+  IF_WASM(V, WasmInstanceObject)        \
+  IF_WASM(V, WasmJSFunctionData)        \
+  IF_WASM(V, WasmStruct)                \
+  IF_WASM(V, WasmTypeInfo)
 
 #define FORWARD_DECLARE(TypeName) class TypeName;
 TYPED_VISITOR_ID_LIST(FORWARD_DECLARE)
+TORQUE_VISITOR_ID_LIST(FORWARD_DECLARE)
 #undef FORWARD_DECLARE
 
 // The base class for visitors that need to dispatch on object type. The default
@@ -85,6 +81,8 @@ class HeapVisitor : public ObjectVisitor {
  public:
   V8_INLINE ResultType Visit(HeapObject object);
   V8_INLINE ResultType Visit(Map map, HeapObject object);
+  // A callback for visiting the map pointer in the object header.
+  V8_INLINE void VisitMapPointer(HeapObject host);
 
  protected:
   // A guard predicate for visiting the object.
@@ -93,8 +91,6 @@ class HeapVisitor : public ObjectVisitor {
   V8_INLINE bool ShouldVisit(HeapObject object) { return true; }
   // Guard predicate for visiting the objects map pointer separately.
   V8_INLINE bool ShouldVisitMapPointer() { return true; }
-  // A callback for visiting the map pointer in the object header.
-  V8_INLINE void VisitMapPointer(HeapObject host);
   // If this predicate returns false, then the heap visitor will fail
   // in default Visit implemention for subclasses of JSObject.
   V8_INLINE bool AllowDefaultJSObjectVisit() { return true; }
@@ -102,6 +98,7 @@ class HeapVisitor : public ObjectVisitor {
 #define VISIT(TypeName) \
   V8_INLINE ResultType Visit##TypeName(Map map, TypeName object);
   TYPED_VISITOR_ID_LIST(VISIT)
+  TORQUE_VISITOR_ID_LIST(VISIT)
 #undef VISIT
   V8_INLINE ResultType VisitShortcutCandidate(Map map, ConsString object);
   V8_INLINE ResultType VisitDataObject(Map map, HeapObject object);
@@ -109,7 +106,6 @@ class HeapVisitor : public ObjectVisitor {
   V8_INLINE ResultType VisitJSApiObject(Map map, JSObject object);
   V8_INLINE ResultType VisitStruct(Map map, HeapObject object);
   V8_INLINE ResultType VisitFreeSpace(Map map, FreeSpace object);
-  V8_INLINE ResultType VisitWeakArray(Map map, HeapObject object);
 
   template <typename T>
   static V8_INLINE T Cast(HeapObject object);
@@ -143,8 +139,6 @@ class WeakObjectRetainer;
 // access the next-element pointers.
 template <class T>
 Object VisitWeakList(Heap* heap, Object list, WeakObjectRetainer* retainer);
-template <class T>
-Object VisitWeakList2(Heap* heap, Object list, WeakObjectRetainer* retainer);
 }  // namespace internal
 }  // namespace v8
 

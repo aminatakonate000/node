@@ -13,14 +13,19 @@ from . import base
 EXTRA_FLAGS = [
   (0.1, '--always-opt'),
   (0.1, '--assert-types'),
+  # TODO(mythria): https://crbug.com/v8/10243
+  # (0.1, '--budget-for-feedback-vector-allocation=0'),
   (0.1, '--cache=code'),
   (0.1, '--force-slow-path'),
   (0.2, '--future'),
+  (0.1, '--interrupt-budget=100'),
   (0.1, '--liftoff'),
   (0.2, '--no-analyze-environment-liveness'),
-  (0.1, '--no-enable-sse3'),
-  (0.1, '--no-enable-ssse3'),
-  (0.1, '--no-enable-sse4_1'),
+  # TODO(machenbach): Enable when it doesn't collide with crashing on missing
+  # simd features.
+  #(0.1, '--no-enable-sse3'),
+  #(0.1, '--no-enable-ssse3'),
+  #(0.1, '--no-enable-sse4_1'),
   (0.1, '--no-enable-sse4_2'),
   (0.1, '--no-enable-sahf'),
   (0.1, '--no-enable-avx'),
@@ -29,6 +34,7 @@ EXTRA_FLAGS = [
   (0.1, '--no-enable-bmi2'),
   (0.1, '--no-enable-lzcnt'),
   (0.1, '--no-enable-popcnt'),
+  (0.3, '--no-lazy-feedback-allocation'),
   (0.1, '--no-liftoff'),
   (0.1, '--no-opt'),
   (0.2, '--no-regexp-tier-up'),
@@ -37,6 +43,7 @@ EXTRA_FLAGS = [
   (0.1, '--regexp-tier-up-ticks=10'),
   (0.1, '--regexp-tier-up-ticks=100'),
   (0.1, '--stress-background-compile'),
+  (0.1, '--stress-concurrent-inlining'),
   (0.1, '--stress-lazy-source-positions'),
   (0.1, '--stress-wasm-code-gc'),
   (0.1, '--turbo-instruction-scheduling'),

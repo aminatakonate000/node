@@ -1,7 +1,7 @@
-#include <node.h>
-#include <assert.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
+#include <node.h>
+#include <assert.h>
 
 namespace {
 
@@ -24,7 +24,7 @@ inline void Initialize(v8::Local<v8::Object> exports,
                        v8::Local<v8::Context> context) {
   auto isolate = context->GetIsolate();
   auto key = v8::String::NewFromUtf8(
-      isolate, "randomBytes", v8::NewStringType::kNormal).ToLocalChecked();
+      isolate, "randomBytes").ToLocalChecked();
   auto value = v8::FunctionTemplate::New(isolate, RandomBytes)
                    ->GetFunction(context)
                    .ToLocalChecked();

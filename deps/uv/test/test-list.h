@@ -116,7 +116,8 @@ TEST_DECLARE   (tcp_open_bound)
 TEST_DECLARE   (tcp_open_connected)
 TEST_DECLARE   (tcp_connect_error_after_write)
 TEST_DECLARE   (tcp_shutdown_after_write)
-TEST_DECLARE   (tcp_bind_error_addrinuse)
+TEST_DECLARE   (tcp_bind_error_addrinuse_connect)
+TEST_DECLARE   (tcp_bind_error_addrinuse_listen)
 TEST_DECLARE   (tcp_bind_error_addrnotavail_1)
 TEST_DECLARE   (tcp_bind_error_addrnotavail_2)
 TEST_DECLARE   (tcp_bind_error_fault)
@@ -127,6 +128,8 @@ TEST_DECLARE   (tcp_bind_writable_flags)
 TEST_DECLARE   (tcp_listen_without_bind)
 TEST_DECLARE   (tcp_connect_error_fault)
 TEST_DECLARE   (tcp_connect_timeout)
+TEST_DECLARE   (tcp_local_connect_timeout)
+TEST_DECLARE   (tcp6_local_connect_timeout)
 TEST_DECLARE   (tcp_close_while_connecting)
 TEST_DECLARE   (tcp_close)
 TEST_DECLARE   (tcp_close_reset_accepted)
@@ -145,6 +148,7 @@ TEST_DECLARE   (tcp_flags)
 TEST_DECLARE   (tcp_write_to_half_open_connection)
 TEST_DECLARE   (tcp_unexpected_read)
 TEST_DECLARE   (tcp_read_stop)
+TEST_DECLARE   (tcp_read_stop_start)
 TEST_DECLARE   (tcp_bind6_error_addrinuse)
 TEST_DECLARE   (tcp_bind6_error_addrnotavail)
 TEST_DECLARE   (tcp_bind6_error_fault)
@@ -162,6 +166,7 @@ TEST_DECLARE   (udp_send_and_recv)
 TEST_DECLARE   (udp_send_hang_loop)
 TEST_DECLARE   (udp_send_immediate)
 TEST_DECLARE   (udp_send_unreachable)
+TEST_DECLARE   (udp_mmsg)
 TEST_DECLARE   (udp_multicast_join)
 TEST_DECLARE   (udp_multicast_join6)
 TEST_DECLARE   (udp_multicast_ttl)
@@ -180,6 +185,7 @@ TEST_DECLARE   (udp_open_connect)
 #ifndef _WIN32
 TEST_DECLARE   (udp_send_unix)
 #endif
+TEST_DECLARE   (udp_sendmmsg_error)
 TEST_DECLARE   (udp_try_send)
 TEST_DECLARE   (pipe_bind_error_addrinuse)
 TEST_DECLARE   (pipe_bind_error_addrnotavail)
@@ -280,6 +286,7 @@ TEST_DECLARE   (getnameinfo_basic_ip6)
 TEST_DECLARE   (getsockname_tcp)
 TEST_DECLARE   (getsockname_udp)
 TEST_DECLARE   (gettimeofday)
+TEST_DECLARE   (test_macros)
 TEST_DECLARE   (fail_always)
 TEST_DECLARE   (pass_always)
 TEST_DECLARE   (socket_buffer_size)
@@ -346,13 +353,16 @@ TEST_DECLARE   (fs_symlink_dir)
 #ifdef _WIN32
 TEST_DECLARE   (fs_symlink_junction)
 TEST_DECLARE   (fs_non_symlink_reparse_point)
+TEST_DECLARE   (fs_lstat_windows_store_apps)
 TEST_DECLARE   (fs_open_flags)
 #endif
 #if defined(_WIN32) && !defined(USING_UV_SHARED)
 TEST_DECLARE   (fs_fd_hash)
 #endif
 TEST_DECLARE   (fs_utime)
+TEST_DECLARE   (fs_utime_round)
 TEST_DECLARE   (fs_futime)
+TEST_DECLARE   (fs_lutime)
 TEST_DECLARE   (fs_file_open_append)
 TEST_DECLARE   (fs_statfs)
 TEST_DECLARE   (fs_stat_missing_path)
@@ -408,6 +418,7 @@ TEST_DECLARE   (fs_open_readonly_acl)
 TEST_DECLARE   (fs_fchmod_archive_readonly)
 TEST_DECLARE   (fs_invalid_mkdir_name)
 #endif
+TEST_DECLARE   (fs_get_system_error)
 TEST_DECLARE   (strscpy)
 TEST_DECLARE   (threadpool_queue_work_simple)
 TEST_DECLARE   (threadpool_queue_work_einval)
@@ -442,12 +453,16 @@ TEST_DECLARE   (poll_nested_epoll)
 #ifdef UV_HAVE_KQUEUE
 TEST_DECLARE   (poll_nested_kqueue)
 #endif
+TEST_DECLARE   (poll_multiple_handles)
 
 TEST_DECLARE   (ip4_addr)
 TEST_DECLARE   (ip6_addr_link_local)
 
 TEST_DECLARE   (poll_close_doesnt_corrupt_stack)
 TEST_DECLARE   (poll_closesocket)
+TEST_DECLARE   (close_fd)
+TEST_DECLARE   (closed_fd_events)
+TEST_DECLARE   (spawn_fs_open)
 #ifdef _WIN32
 TEST_DECLARE   (spawn_detect_pipe_name_collisions_on_windows)
 #if !defined(USING_UV_SHARED)
@@ -462,8 +477,6 @@ TEST_DECLARE   (ipc_listen_after_bind_twice)
 TEST_DECLARE   (win32_signum_number)
 #else
 TEST_DECLARE   (emfile)
-TEST_DECLARE   (close_fd)
-TEST_DECLARE   (spawn_fs_open)
 TEST_DECLARE   (spawn_setuid_setgid)
 TEST_DECLARE   (we_get_signal)
 TEST_DECLARE   (we_get_signals)
@@ -472,7 +485,6 @@ TEST_DECLARE   (we_get_signals_mixed)
 TEST_DECLARE   (signal_multiple_loops)
 TEST_DECLARE   (signal_pending_on_close)
 TEST_DECLARE   (signal_close_loop_alive)
-TEST_DECLARE   (closed_fd_events)
 #endif
 #ifdef __APPLE__
 TEST_DECLARE   (osx_select)
@@ -512,7 +524,12 @@ TEST_DECLARE  (fork_threadpool_queue_work_simple)
 
 TEST_DECLARE  (idna_toascii)
 TEST_DECLARE  (utf8_decode1)
+TEST_DECLARE  (utf8_decode1_overrun)
 TEST_DECLARE  (uname)
+
+TEST_DECLARE  (metrics_idle_time)
+TEST_DECLARE  (metrics_idle_time_thread)
+TEST_DECLARE  (metrics_idle_time_zero)
 
 TASK_LIST_START
   TEST_ENTRY_CUSTOM (platform_output, 0, 1, 5000)
@@ -520,6 +537,7 @@ TASK_LIST_START
 #if 0
   TEST_ENTRY  (callback_order)
 #endif
+  TEST_ENTRY  (test_macros)
   TEST_ENTRY  (close_order)
   TEST_ENTRY  (run_once)
   TEST_ENTRY  (run_nowait)
@@ -553,7 +571,8 @@ TASK_LIST_START
 #ifndef _WIN32
   TEST_ENTRY  (pipe_close_stdout_read_stdin)
 #endif
-  TEST_ENTRY  (pipe_set_non_blocking)
+  /* Seems to be either about 0.5s or 5s, depending on the OS. */
+  TEST_ENTRY_CUSTOM (pipe_set_non_blocking, 0, 0, 20000)
   TEST_ENTRY  (pipe_set_chmod)
   TEST_ENTRY  (tty)
 #ifdef _WIN32
@@ -657,7 +676,13 @@ TASK_LIST_START
   TEST_HELPER (tcp_shutdown_after_write, tcp4_echo_server)
 
   TEST_ENTRY  (tcp_connect_error_after_write)
-  TEST_ENTRY  (tcp_bind_error_addrinuse)
+  TEST_ENTRY  (tcp_bind_error_addrinuse_connect)
+  /* tcp4_echo_server steals the port. It needs to be a separate process
+   * because libuv sets setsockopt(SO_REUSEADDR) that lets you steal an
+   * existing bind if it originates from the same process.
+   */
+  TEST_HELPER (tcp_bind_error_addrinuse_connect, tcp4_echo_server)
+  TEST_ENTRY  (tcp_bind_error_addrinuse_listen)
   TEST_ENTRY  (tcp_bind_error_addrnotavail_1)
   TEST_ENTRY  (tcp_bind_error_addrnotavail_2)
   TEST_ENTRY  (tcp_bind_error_fault)
@@ -668,6 +693,8 @@ TASK_LIST_START
   TEST_ENTRY  (tcp_listen_without_bind)
   TEST_ENTRY  (tcp_connect_error_fault)
   TEST_ENTRY  (tcp_connect_timeout)
+  TEST_ENTRY  (tcp_local_connect_timeout)
+  TEST_ENTRY  (tcp6_local_connect_timeout)
   TEST_ENTRY  (tcp_close_while_connecting)
   TEST_ENTRY  (tcp_close)
   TEST_ENTRY  (tcp_close_reset_accepted)
@@ -688,6 +715,8 @@ TASK_LIST_START
 
   TEST_ENTRY  (tcp_read_stop)
   TEST_HELPER (tcp_read_stop, tcp4_echo_server)
+
+  TEST_ENTRY  (tcp_read_stop_start)
 
   TEST_ENTRY  (tcp_bind6_error_addrinuse)
   TEST_ENTRY  (tcp_bind6_error_addrnotavail)
@@ -712,11 +741,13 @@ TASK_LIST_START
   TEST_ENTRY  (udp_options)
   TEST_ENTRY  (udp_options6)
   TEST_ENTRY  (udp_no_autobind)
+  TEST_ENTRY  (udp_mmsg)
   TEST_ENTRY  (udp_multicast_interface)
   TEST_ENTRY  (udp_multicast_interface6)
   TEST_ENTRY  (udp_multicast_join)
   TEST_ENTRY  (udp_multicast_join6)
   TEST_ENTRY  (udp_multicast_ttl)
+  TEST_ENTRY  (udp_sendmmsg_error)
   TEST_ENTRY  (udp_try_send)
 
   TEST_ENTRY  (udp_open)
@@ -839,7 +870,7 @@ TASK_LIST_START
 
   TEST_ENTRY  (tmpdir)
 
-  TEST_ENTRY_CUSTOM (hrtime, 0, 0, 10000)
+  TEST_ENTRY_CUSTOM (hrtime, 0, 0, 20000)
 
   TEST_ENTRY_CUSTOM (getaddrinfo_fail, 0, 0, 10000)
   TEST_ENTRY_CUSTOM (getaddrinfo_fail_sync, 0, 0, 10000)
@@ -874,6 +905,7 @@ TASK_LIST_START
 #ifdef UV_HAVE_KQUEUE
   TEST_ENTRY  (poll_nested_kqueue)
 #endif
+  TEST_ENTRY  (poll_multiple_handles)
 
   TEST_ENTRY  (socket_buffer_size)
 
@@ -915,6 +947,9 @@ TASK_LIST_START
 
   TEST_ENTRY  (poll_close_doesnt_corrupt_stack)
   TEST_ENTRY  (poll_closesocket)
+  TEST_ENTRY  (close_fd)
+  TEST_ENTRY  (closed_fd_events)
+  TEST_ENTRY  (spawn_fs_open)
 #ifdef _WIN32
   TEST_ENTRY  (spawn_detect_pipe_name_collisions_on_windows)
 #if !defined(USING_UV_SHARED)
@@ -929,8 +964,6 @@ TASK_LIST_START
   TEST_ENTRY  (win32_signum_number)
 #else
   TEST_ENTRY  (emfile)
-  TEST_ENTRY  (close_fd)
-  TEST_ENTRY  (spawn_fs_open)
   TEST_ENTRY  (spawn_setuid_setgid)
   TEST_ENTRY  (we_get_signal)
   TEST_ENTRY  (we_get_signals)
@@ -939,7 +972,6 @@ TASK_LIST_START
   TEST_ENTRY  (signal_multiple_loops)
   TEST_ENTRY  (signal_pending_on_close)
   TEST_ENTRY  (signal_close_loop_alive)
-  TEST_ENTRY  (closed_fd_events)
 #endif
 
 #ifdef __APPLE__
@@ -968,7 +1000,9 @@ TASK_LIST_START
 #endif
   TEST_ENTRY  (fs_chown)
   TEST_ENTRY  (fs_utime)
+  TEST_ENTRY  (fs_utime_round)
   TEST_ENTRY  (fs_futime)
+  TEST_ENTRY  (fs_lutime)
   TEST_ENTRY  (fs_readlink)
   TEST_ENTRY  (fs_realpath)
   TEST_ENTRY  (fs_symlink)
@@ -976,6 +1010,7 @@ TASK_LIST_START
 #ifdef _WIN32
   TEST_ENTRY  (fs_symlink_junction)
   TEST_ENTRY  (fs_non_symlink_reparse_point)
+  TEST_ENTRY  (fs_lstat_windows_store_apps)
   TEST_ENTRY  (fs_open_flags)
 #endif
 #if defined(_WIN32) && !defined(USING_UV_SHARED)
@@ -1005,7 +1040,7 @@ TASK_LIST_START
   TEST_ENTRY  (fs_event_close_with_pending_event)
   TEST_ENTRY  (fs_event_close_in_callback)
   TEST_ENTRY  (fs_event_start_and_close)
-  TEST_ENTRY  (fs_event_error_reporting)
+  TEST_ENTRY_CUSTOM (fs_event_error_reporting, 0, 0, 60000)
   TEST_ENTRY  (fs_event_getpath)
   TEST_ENTRY  (fs_scandir_empty_dir)
   TEST_ENTRY  (fs_scandir_non_existent_dir)
@@ -1034,6 +1069,7 @@ TASK_LIST_START
   TEST_ENTRY  (fs_fchmod_archive_readonly)
   TEST_ENTRY  (fs_invalid_mkdir_name)
 #endif
+  TEST_ENTRY  (fs_get_system_error)
   TEST_ENTRY  (get_osfhandle_valid_handle)
   TEST_ENTRY  (open_osfhandle_valid_handle)
   TEST_ENTRY  (strscpy)
@@ -1085,12 +1121,17 @@ TASK_LIST_START
 #endif
 
   TEST_ENTRY  (utf8_decode1)
+  TEST_ENTRY  (utf8_decode1_overrun)
   TEST_ENTRY  (uname)
 
 /* Doesn't work on z/OS because that platform uses EBCDIC, not ASCII. */
 #ifndef __MVS__
   TEST_ENTRY  (idna_toascii)
 #endif
+
+  TEST_ENTRY  (metrics_idle_time)
+  TEST_ENTRY  (metrics_idle_time_thread)
+  TEST_ENTRY  (metrics_idle_time_zero)
 
 #if 0
   /* These are for testing the test runner. */

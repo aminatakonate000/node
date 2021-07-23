@@ -23,7 +23,8 @@
 #include "aliased_buffer.h"
 #include "memory_tracker-inl.h"
 #include "node_buffer.h"
-#include "node_process.h"
+#include "node_external_reference.h"
+#include "node_process-inl.h"
 #include "node_stat_watcher.h"
 #include "util-inl.h"
 
@@ -51,6 +52,8 @@ namespace node {
 namespace fs {
 
 using v8::Array;
+using v8::BigInt;
+using v8::Boolean;
 using v8::Context;
 using v8::EscapableHandleScope;
 using v8::Function;
@@ -68,7 +71,6 @@ using v8::ObjectTemplate;
 using v8::Promise;
 using v8::String;
 using v8::Symbol;
-using v8::Uint32;
 using v8::Undefined;
 using v8::Value;
 
@@ -81,6 +83,29 @@ constexpr char kPathSeparator = '/';
 #else
 const char* const kPathSeparator = "\\/";
 #endif
+
+std::string Basename(const std::string& str, const std::string& extension) {
+  // Remove everything leading up to and including the final path separator.
+  std::string::size_type pos = str.find_last_of(kPathSeparator);
+
+  // Starting index for the resulting string
+  std::size_t start_pos = 0;
+  // String size to return
+  std::size_t str_size = str.size();
+  if (pos != std::string::npos) {
+    start_pos = pos + 1;
+    str_size -= start_pos;
+  }
+
+  // Strip away the extension, if any.
+  if (str_size >= extension.size() &&
+      str.compare(str.size() - extension.size(),
+        extension.size(), extension) == 0) {
+    str_size -= extension.size();
+  }
+
+  return str.substr(start_pos, str_size);
+}
 
 inline int64_t GetOffset(Local<Value> value) {
   return IsSafeJsInt(value) ? value.As<Integer>()->Value() : -1;
@@ -109,9 +134,9 @@ void FSContinuationData::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("paths", paths_);
 }
 
-FileHandleReadWrap::~FileHandleReadWrap() {}
+FileHandleReadWrap::~FileHandleReadWrap() = default;
 
-FSReqBase::~FSReqBase() {}
+FSReqBase::~FSReqBase() = default;
 
 void FSReqBase::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("continuation_data", continuation_data_);
@@ -142,7 +167,7 @@ FileHandle* FileHandle::New(BindingData* binding_data,
 }
 
 void FileHandle::New(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Unwrap<BindingData>(args.Data());
+  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
   Environment* env = binding_data->env();
   CHECK(args.IsConstructCall());
   CHECK(args[0]->IsInt32());
@@ -173,13 +198,49 @@ void FileHandle::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("current_read", current_read_);
 }
 
+FileHandle::TransferMode FileHandle::GetTransferMode() const {
+  return reading_ || closing_ || closed_ ?
+      TransferMode::kUntransferable : TransferMode::kTransferable;
+}
+
+std::unique_ptr<worker::TransferData> FileHandle::TransferForMessaging() {
+  CHECK_NE(GetTransferMode(), TransferMode::kUntransferable);
+  auto ret = std::make_unique<TransferData>(fd_);
+  closed_ = true;
+  return ret;
+}
+
+FileHandle::TransferData::TransferData(int fd) : fd_(fd) {}
+
+FileHandle::TransferData::~TransferData() {
+  if (fd_ > 0) {
+    uv_fs_t close_req;
+    CHECK_NE(fd_, -1);
+    CHECK_EQ(0, uv_fs_close(nullptr, &close_req, fd_, nullptr));
+    uv_fs_req_cleanup(&close_req);
+  }
+}
+
+BaseObjectPtr<BaseObject> FileHandle::TransferData::Deserialize(
+    Environment* env,
+    v8::Local<v8::Context> context,
+    std::unique_ptr<worker::TransferData> self) {
+  BindingData* bd = Environment::GetBindingData<BindingData>(context);
+  if (bd == nullptr) return {};
+
+  int fd = fd_;
+  fd_ = -1;
+  return BaseObjectPtr<BaseObject> { FileHandle::New(bd, fd) };
+}
+
 // Close the file descriptor if it hasn't already been closed. A process
 // warning will be emitted using a SetImmediate to avoid calling back to
 // JS during GC. If closing the fd fails at this point, a fatal exception
 // will crash the process immediately.
 inline void FileHandle::Close() {
-  if (closed_) return;
+  if (closed_ || closing_) return;
   uv_fs_t req;
+  CHECK_NE(fd_, -1);
   int ret = uv_fs_close(env()->event_loop(), &req, fd_, nullptr);
   uv_fs_req_cleanup(&req);
 
@@ -210,7 +271,7 @@ inline void FileHandle::Close() {
   // to notify that the file descriptor was gc'd. We want to be noisy about
   // this because not explicitly closing the FileHandle is a bug.
 
-  env()->SetUnrefImmediate([detail](Environment* env) {
+  env()->SetImmediate([detail](Environment* env) {
     ProcessEmitWarning(env,
                        "Closing file descriptor %d on garbage collection",
                        detail.fd);
@@ -224,12 +285,13 @@ inline void FileHandle::Close() {
           "thrown if a file descriptor is closed during garbage collection.",
           "DEP0137").IsNothing();
     }
-  });
+  }, CallbackFlags::kUnrefed);
 }
 
 void FileHandle::CloseReq::Resolve() {
   Isolate* isolate = env()->isolate();
   HandleScope scope(isolate);
+  Context::Scope context_scope(env()->context());
   InternalCallbackScope callback_scope(this);
   Local<Promise> promise = promise_.Get(isolate);
   Local<Promise::Resolver> resolver = promise.As<Promise::Resolver>();
@@ -239,6 +301,7 @@ void FileHandle::CloseReq::Resolve() {
 void FileHandle::CloseReq::Reject(Local<Value> reason) {
   Isolate* isolate = env()->isolate();
   HandleScope scope(isolate);
+  Context::Scope context_scope(env()->context());
   InternalCallbackScope callback_scope(this);
   Local<Promise> promise = promise_.Get(isolate);
   Local<Promise::Resolver> resolver = promise.As<Promise::Resolver>();
@@ -284,43 +347,52 @@ MaybeLocal<Promise> FileHandle::ClosePromise() {
   Isolate* isolate = env()->isolate();
   EscapableHandleScope scope(isolate);
   Local<Context> context = env()->context();
+
+  Local<Value> close_resolver =
+      object()->GetInternalField(FileHandle::kClosingPromiseSlot);
+  if (!close_resolver.IsEmpty() && !close_resolver->IsUndefined()) {
+    CHECK(close_resolver->IsPromise());
+    return close_resolver.As<Promise>();
+  }
+
+  CHECK(!closed_);
+  CHECK(!closing_);
+  CHECK(!reading_);
+
   auto maybe_resolver = Promise::Resolver::New(context);
   CHECK(!maybe_resolver.IsEmpty());
   Local<Promise::Resolver> resolver = maybe_resolver.ToLocalChecked();
   Local<Promise> promise = resolver.As<Promise>();
-  CHECK(!reading_);
-  if (!closed_ && !closing_) {
-    closing_ = true;
-    Local<Object> close_req_obj;
-    if (!env()
-             ->fdclose_constructor_template()
-             ->NewInstance(env()->context())
-             .ToLocal(&close_req_obj)) {
-      return MaybeLocal<Promise>();
-    }
-    CloseReq* req = new CloseReq(env(), close_req_obj, promise, object());
-    auto AfterClose = uv_fs_callback_t{[](uv_fs_t* req) {
-      std::unique_ptr<CloseReq> close(CloseReq::from_req(req));
-      CHECK_NOT_NULL(close);
-      close->file_handle()->AfterClose();
-      Isolate* isolate = close->env()->isolate();
-      if (req->result < 0) {
-        HandleScope handle_scope(isolate);
-        close->Reject(UVException(isolate, req->result, "close"));
-      } else {
-        close->Resolve();
-      }
-    }};
-    int ret = req->Dispatch(uv_fs_close, fd_, AfterClose);
-    if (ret < 0) {
-      req->Reject(UVException(isolate, ret, "close"));
-      delete req;
-    }
-  } else {
-    // Already closed. Just reject the promise immediately
-    resolver->Reject(context, UVException(isolate, UV_EBADF, "close"))
-        .Check();
+
+  Local<Object> close_req_obj;
+  if (!env()->fdclose_constructor_template()
+          ->NewInstance(env()->context()).ToLocal(&close_req_obj)) {
+    return MaybeLocal<Promise>();
   }
+  closing_ = true;
+  object()->SetInternalField(FileHandle::kClosingPromiseSlot, promise);
+
+  CloseReq* req = new CloseReq(env(), close_req_obj, promise, object());
+  auto AfterClose = uv_fs_callback_t{[](uv_fs_t* req) {
+    std::unique_ptr<CloseReq> close(CloseReq::from_req(req));
+    CHECK_NOT_NULL(close);
+    close->file_handle()->AfterClose();
+    Isolate* isolate = close->env()->isolate();
+    if (req->result < 0) {
+      HandleScope handle_scope(isolate);
+      close->Reject(
+          UVException(isolate, static_cast<int>(req->result), "close"));
+    } else {
+      close->Resolve();
+    }
+  }};
+  CHECK_NE(fd_, -1);
+  int ret = req->Dispatch(uv_fs_close, fd_, AfterClose);
+  if (ret < 0) {
+    req->Reject(UVException(isolate, ret, "close"));
+    delete req;
+  }
+
   return scope.Escape(promise);
 }
 
@@ -430,16 +502,16 @@ int FileHandle::ReadStart() {
     BaseObjectPtr<FileHandleReadWrap> read_wrap =
         std::move(handle->current_read_);
 
-    int result = req->result;
+    ssize_t result = req->result;
     uv_buf_t buffer = read_wrap->buffer_;
 
     uv_fs_req_cleanup(req);
 
     // Push the read wrap back to the freelist, or let it be destroyed
     // once we’re exiting the current scope.
-    constexpr size_t wanted_freelist_fill = 100;
+    constexpr size_t kWantedFreelistFill = 100;
     auto& freelist = handle->binding_data_->file_handle_read_wrap_freelist;
-    if (freelist.size() < wanted_freelist_fill) {
+    if (freelist.size() < kWantedFreelistFill) {
       read_wrap->Reset();
       freelist.emplace_back(std::move(read_wrap));
     }
@@ -486,15 +558,20 @@ ShutdownWrap* FileHandle::CreateShutdownWrap(Local<Object> object) {
 }
 
 int FileHandle::DoShutdown(ShutdownWrap* req_wrap) {
+  if (closing_ || closed_) {
+    req_wrap->Done(0);
+    return 1;
+  }
   FileHandleCloseWrap* wrap = static_cast<FileHandleCloseWrap*>(req_wrap);
   closing_ = true;
+  CHECK_NE(fd_, -1);
   wrap->Dispatch(uv_fs_close, fd_, uv_fs_callback_t{[](uv_fs_t* req) {
     FileHandleCloseWrap* wrap = static_cast<FileHandleCloseWrap*>(
         FileHandleCloseWrap::from_req(req));
     FileHandle* handle = static_cast<FileHandle*>(wrap->stream());
     handle->AfterClose();
 
-    int result = req->result;
+    int result = static_cast<int>(req->result);
     uv_fs_req_cleanup(req);
     wrap->Done(result);
   }});
@@ -527,7 +604,7 @@ void FSReqCallback::SetReturnValue(const FunctionCallbackInfo<Value>& args) {
 
 void NewFSReqCallback(const FunctionCallbackInfo<Value>& args) {
   CHECK(args.IsConstructCall());
-  BindingData* binding_data = Unwrap<BindingData>(args.Data());
+  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
   new FSReqCallback(binding_data, args.This(), args[0]->IsTrue());
 }
 
@@ -540,8 +617,15 @@ FSReqAfterScope::FSReqAfterScope(FSReqBase* wrap, uv_fs_t* req)
 }
 
 FSReqAfterScope::~FSReqAfterScope() {
+  Clear();
+}
+
+void FSReqAfterScope::Clear() {
+  if (!wrap_) return;
+
   uv_fs_req_cleanup(wrap_->req());
-  delete wrap_;
+  wrap_->Detach();
+  wrap_.reset();
 }
 
 // TODO(joyeecheung): create a normal context object, and
@@ -554,12 +638,15 @@ FSReqAfterScope::~FSReqAfterScope() {
 // which is also why the errors should have been constructed
 // in JS for more flexibility.
 void FSReqAfterScope::Reject(uv_fs_t* req) {
-  wrap_->Reject(UVException(wrap_->env()->isolate(),
-                            req->result,
-                            wrap_->syscall(),
-                            nullptr,
-                            req->path,
-                            wrap_->data()));
+  BaseObjectPtr<FSReqBase> wrap { wrap_ };
+  Local<Value> exception = UVException(wrap_->env()->isolate(),
+                                       static_cast<int>(req->result),
+                                       wrap_->syscall(),
+                                       nullptr,
+                                       req->path,
+                                       wrap_->data());
+  Clear();
+  wrap->Reject(exception);
 }
 
 bool FSReqAfterScope::Proceed() {
@@ -591,8 +678,12 @@ void AfterInteger(uv_fs_t* req) {
   FSReqBase* req_wrap = FSReqBase::from_req(req);
   FSReqAfterScope after(req_wrap, req);
 
+  int result = static_cast<int>(req->result);
+  if (result >= 0 && req_wrap->is_plain_open())
+    req_wrap->env()->AddUnmanagedFd(result);
+
   if (after.Proceed())
-    req_wrap->Resolve(Integer::New(req_wrap->env()->isolate(), req->result));
+    req_wrap->Resolve(Integer::New(req_wrap->env()->isolate(), result));
 }
 
 void AfterOpenFileHandle(uv_fs_t* req) {
@@ -600,7 +691,8 @@ void AfterOpenFileHandle(uv_fs_t* req) {
   FSReqAfterScope after(req_wrap, req);
 
   if (after.Proceed()) {
-    FileHandle* fd = FileHandle::New(req_wrap->binding_data(), req->result);
+    FileHandle* fd = FileHandle::New(req_wrap->binding_data(),
+                                     static_cast<int>(req->result));
     if (fd == nullptr) return;
     req_wrap->Resolve(fd->object());
   }
@@ -693,7 +785,7 @@ void AfterScanDir(uv_fs_t* req) {
   int r;
   std::vector<Local<Value>> name_v;
 
-  for (int i = 0; ; i++) {
+  for (;;) {
     uv_dirent_t ent;
 
     r = uv_fs_scandir_next(req, &ent);
@@ -734,7 +826,7 @@ void AfterScanDirWithTypes(uv_fs_t* req) {
   std::vector<Local<Value>> name_v;
   std::vector<Local<Value>> type_v;
 
-  for (int i = 0; ; i++) {
+  for (;;) {
     uv_dirent_t ent;
 
     r = uv_fs_scandir_next(req, &ent);
@@ -800,6 +892,7 @@ void Close(const FunctionCallbackInfo<Value>& args) {
 
   CHECK(args[0]->IsInt32());
   int fd = args[0].As<Int32>()->Value();
+  env->RemoveUnmanagedFd(fd);
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 1);
   if (req_wrap_async != nullptr) {  // close(fd, req)
@@ -815,9 +908,7 @@ void Close(const FunctionCallbackInfo<Value>& args) {
 }
 
 
-// Used to speed up module loading.  Returns the contents of the file as
-// a string or undefined when the file cannot be opened or "main" is not found
-// in the file.
+// Used to speed up module loading. Returns an array [string, boolean]
 static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
@@ -826,14 +917,16 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[0]->IsString());
   node::Utf8Value path(isolate, args[0]);
 
-  if (strlen(*path) != path.length())
+  if (strlen(*path) != path.length()) {
+    args.GetReturnValue().Set(Array::New(isolate));
     return;  // Contains a nul byte.
-
+  }
   uv_fs_t open_req;
   const int fd = uv_fs_open(loop, &open_req, *path, O_RDONLY, 0, nullptr);
   uv_fs_req_cleanup(&open_req);
 
   if (fd < 0) {
+    args.GetReturnValue().Set(Array::New(isolate));
     return;
   }
 
@@ -859,9 +952,10 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
     numchars = uv_fs_read(loop, &read_req, fd, &buf, 1, offset, nullptr);
     uv_fs_req_cleanup(&read_req);
 
-    if (numchars < 0)
+    if (numchars < 0) {
+      args.GetReturnValue().Set(Array::New(isolate));
       return;
-
+    }
     offset += numchars;
   } while (static_cast<size_t>(numchars) == kBlockSize);
 
@@ -894,21 +988,20 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
       if (0 == memcmp(s, "type", 4)) break;
     } else if (n == 7) {
       if (0 == memcmp(s, "exports", 7)) break;
+      if (0 == memcmp(s, "imports", 7)) break;
     }
   }
 
-  Local<String> return_value;
-  if (p < pe) {
-    return_value =
-        String::NewFromUtf8(isolate,
-                            &chars[start],
-                            v8::NewStringType::kNormal,
-                            size).ToLocalChecked();
-  } else {
-    return_value = env->empty_object_string();
-  }
 
-  args.GetReturnValue().Set(return_value);
+  Local<Value> return_value[] = {
+    String::NewFromUtf8(isolate,
+                        &chars[start],
+                        v8::NewStringType::kNormal,
+                        size).ToLocalChecked(),
+    Boolean::New(isolate, p < pe ? true : false)
+  };
+  args.GetReturnValue().Set(
+    Array::New(isolate, return_value, arraysize(return_value)));
 }
 
 // Used to speed up module loading.  Returns 0 if the path refers to
@@ -932,7 +1025,7 @@ static void InternalModuleStat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void Stat(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Unwrap<BindingData>(args.Data());
+  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
   Environment* env = binding_data->env();
 
   const int argc = args.Length();
@@ -963,7 +1056,7 @@ static void Stat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void LStat(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Unwrap<BindingData>(args.Data());
+  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
   Environment* env = binding_data->env();
 
   const int argc = args.Length();
@@ -995,7 +1088,7 @@ static void LStat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void FStat(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Unwrap<BindingData>(args.Data());
+  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
   Environment* env = binding_data->env();
 
   const int argc = args.Length();
@@ -1029,7 +1122,7 @@ static void Symlink(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
 
-  int argc = args.Length();
+  const int argc = args.Length();
   CHECK_GE(argc, 4);
 
   BufferValue target(isolate, args[0]);
@@ -1058,7 +1151,7 @@ static void Link(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
 
-  int argc = args.Length();
+  const int argc = args.Length();
   CHECK_GE(argc, 3);
 
   BufferValue src(isolate, args[0]);
@@ -1085,7 +1178,7 @@ static void ReadLink(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
 
-  int argc = args.Length();
+  const int argc = args.Length();
   CHECK_GE(argc, 3);
 
   BufferValue path(isolate, args[0]);
@@ -1128,7 +1221,7 @@ static void Rename(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
 
-  int argc = args.Length();
+  const int argc = args.Length();
   CHECK_GE(argc, 3);
 
   BufferValue old_path(isolate, args[0]);
@@ -1354,7 +1447,7 @@ int MKDirpAsync(uv_loop_t* loop,
     Environment* env = req_wrap->env();
     uv_loop_t* loop = env->event_loop();
     std::string path = req->path;
-    int err = req->result;
+    int err = static_cast<int>(req->result);
 
     while (true) {
       switch (err) {
@@ -1400,7 +1493,7 @@ int MKDirpAsync(uv_loop_t* loop,
           int err = uv_fs_stat(loop, req, path.c_str(),
                                uv_fs_callback_t{[](uv_fs_t* req) {
             FSReqBase* req_wrap = FSReqBase::from_req(req);
-            int err = req->result;
+            int err = static_cast<int>(req->result);
             if (reinterpret_cast<intptr_t>(req->data) == UV_EEXIST &&
                   req_wrap->continuation_data()->paths().size() > 0) {
               if (err == 0 && S_ISDIR(req->statbuf.st_mode)) {
@@ -1579,7 +1672,7 @@ static void ReadDir(const FunctionCallbackInfo<Value>& args) {
     std::vector<Local<Value>> name_v;
     std::vector<Local<Value>> type_v;
 
-    for (int i = 0; ; i++) {
+    for (;;) {
       uv_dirent_t ent;
 
       r = uv_fs_scandir_next(&(req_wrap_sync.req), &ent);
@@ -1644,6 +1737,7 @@ static void Open(const FunctionCallbackInfo<Value>& args) {
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 3);
   if (req_wrap_async != nullptr) {  // open(path, flags, mode, req)
+    req_wrap_async->set_is_plain_open(true);
     AsyncCall(env, req_wrap_async, args, "open", UTF8, AfterInteger,
               uv_fs_open, *path, flags, mode);
   } else {  // open(path, flags, mode, undefined, ctx)
@@ -1653,12 +1747,13 @@ static void Open(const FunctionCallbackInfo<Value>& args) {
     int result = SyncCall(env, args[4], &req_wrap_sync, "open",
                           uv_fs_open, *path, flags, mode);
     FS_SYNC_TRACE_END(open);
+    if (result >= 0) env->AddUnmanagedFd(result);
     args.GetReturnValue().Set(result);
   }
 }
 
 static void OpenFileHandle(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Unwrap<BindingData>(args.Data());
+  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
   Environment* env = binding_data->env();
   Isolate* isolate = env->isolate();
 
@@ -1869,7 +1964,7 @@ static void WriteString(const FunctionCallbackInfo<Value>& args) {
       auto ext = string->GetExternalOneByteStringResource();
       buf = const_cast<char*>(ext->data());
       len = ext->length();
-    } else if (enc == UCS2 && IsLittleEndian() && string->IsExternal()) {
+    } else if (enc == UCS2 && IsLittleEndian() && string->IsExternalTwoByte()) {
       auto ext = string->GetExternalStringResource();
       buf = reinterpret_cast<char*>(const_cast<uint16_t*>(ext->data()));
       len = ext->length() * sizeof(*ext->data());
@@ -1961,8 +2056,10 @@ static void Read(const FunctionCallbackInfo<Value>& args) {
   const size_t len = static_cast<size_t>(args[3].As<Int32>()->Value());
   CHECK(Buffer::IsWithinBounds(off, len, buffer_length));
 
-  CHECK(IsSafeJsInt(args[4]));
-  const int64_t pos = args[4].As<Integer>()->Value();
+  CHECK(IsSafeJsInt(args[4]) || args[4]->IsBigInt());
+  const int64_t pos = args[4]->IsNumber() ?
+                      args[4].As<Integer>()->Value() :
+                      args[4].As<BigInt>()->Int64Value();
 
   char* buf = buffer_data + off;
   uv_buf_t uvbuf = uv_buf_init(buf, len);
@@ -2101,11 +2198,11 @@ static void Chown(const FunctionCallbackInfo<Value>& args) {
   BufferValue path(env->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
 
-  CHECK(args[1]->IsUint32());
-  const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Uint32>()->Value());
+  CHECK(IsSafeJsInt(args[1]));
+  const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Integer>()->Value());
 
-  CHECK(args[2]->IsUint32());
-  const uv_gid_t gid = static_cast<uv_gid_t>(args[2].As<Uint32>()->Value());
+  CHECK(IsSafeJsInt(args[2]));
+  const uv_gid_t gid = static_cast<uv_gid_t>(args[2].As<Integer>()->Value());
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 3);
   if (req_wrap_async != nullptr) {  // chown(path, uid, gid, req)
@@ -2134,11 +2231,11 @@ static void FChown(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[0]->IsInt32());
   const int fd = args[0].As<Int32>()->Value();
 
-  CHECK(args[1]->IsUint32());
-  const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Uint32>()->Value());
+  CHECK(IsSafeJsInt(args[1]));
+  const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Integer>()->Value());
 
-  CHECK(args[2]->IsUint32());
-  const uv_gid_t gid = static_cast<uv_gid_t>(args[2].As<Uint32>()->Value());
+  CHECK(IsSafeJsInt(args[2]));
+  const uv_gid_t gid = static_cast<uv_gid_t>(args[2].As<Integer>()->Value());
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 3);
   if (req_wrap_async != nullptr) {  // fchown(fd, uid, gid, req)
@@ -2164,11 +2261,11 @@ static void LChown(const FunctionCallbackInfo<Value>& args) {
   BufferValue path(env->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
 
-  CHECK(args[1]->IsUint32());
-  const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Uint32>()->Value());
+  CHECK(IsSafeJsInt(args[1]));
+  const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Integer>()->Value());
 
-  CHECK(args[2]->IsUint32());
-  const uv_gid_t gid = static_cast<uv_gid_t>(args[2].As<Uint32>()->Value());
+  CHECK(IsSafeJsInt(args[2]));
+  const uv_gid_t gid = static_cast<uv_gid_t>(args[2].As<Integer>()->Value());
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 3);
   if (req_wrap_async != nullptr) {  // lchown(path, uid, gid, req)
@@ -2243,6 +2340,35 @@ static void FUTimes(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
+static void LUTimes(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+
+  const int argc = args.Length();
+  CHECK_GE(argc, 3);
+
+  BufferValue path(env->isolate(), args[0]);
+  CHECK_NOT_NULL(*path);
+
+  CHECK(args[1]->IsNumber());
+  const double atime = args[1].As<Number>()->Value();
+
+  CHECK(args[2]->IsNumber());
+  const double mtime = args[2].As<Number>()->Value();
+
+  FSReqBase* req_wrap_async = GetReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // lutimes(path, atime, mtime, req)
+    AsyncCall(env, req_wrap_async, args, "lutime", UTF8, AfterNoArgs,
+              uv_fs_lutime, *path, atime, mtime);
+  } else {  // lutimes(path, atime, mtime, undefined, ctx)
+    CHECK_EQ(argc, 5);
+    FSReqWrapSync req_wrap_sync;
+    FS_SYNC_TRACE_BEGIN(lutimes);
+    SyncCall(env, args[4], &req_wrap_sync, "lutime",
+             uv_fs_lutime, *path, atime, mtime);
+    FS_SYNC_TRACE_END(lutimes);
+  }
+}
+
 static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
@@ -2287,15 +2413,59 @@ void BindingData::MemoryInfo(MemoryTracker* tracker) const {
                       file_handle_read_wrap_freelist);
 }
 
+BindingData::BindingData(Environment* env, v8::Local<v8::Object> wrap)
+    : SnapshotableObject(env, wrap, type_int),
+      stats_field_array(env->isolate(), kFsStatsBufferLength),
+      stats_field_bigint_array(env->isolate(), kFsStatsBufferLength) {
+  wrap->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(env->isolate(), "statValues"),
+            stats_field_array.GetJSArray())
+      .Check();
+
+  wrap->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(env->isolate(), "bigintStatValues"),
+            stats_field_bigint_array.GetJSArray())
+      .Check();
+}
+
+void BindingData::Deserialize(Local<Context> context,
+                              Local<Object> holder,
+                              int index,
+                              InternalFieldInfo* info) {
+  DCHECK_EQ(index, BaseObject::kSlot);
+  HandleScope scope(context->GetIsolate());
+  Environment* env = Environment::GetCurrent(context);
+  BindingData* binding = env->AddBindingData<BindingData>(context, holder);
+  CHECK_NOT_NULL(binding);
+}
+
+void BindingData::PrepareForSerialization(Local<Context> context,
+                                          v8::SnapshotCreator* creator) {
+  CHECK(file_handle_read_wrap_freelist.empty());
+  // We'll just re-initialize the buffers in the constructor since their
+  // contents can be thrown away once consumed in the previous call.
+  stats_field_array.Release();
+  stats_field_bigint_array.Release();
+}
+
+InternalFieldInfo* BindingData::Serialize(int index) {
+  DCHECK_EQ(index, BaseObject::kSlot);
+  InternalFieldInfo* info = InternalFieldInfo::New(type());
+  return info;
+}
+
+// TODO(addaleax): Remove once we're on C++17.
+constexpr FastStringKey BindingData::type_name;
+
 void Initialize(Local<Object> target,
                 Local<Value> unused,
                 Local<Context> context,
                 void* priv) {
   Environment* env = Environment::GetCurrent(context);
   Isolate* isolate = env->isolate();
-  Environment::BindingScope<BindingData> binding_scope(env);
-  if (!binding_scope) return;
-  BindingData* binding_data = binding_scope.data;
+  BindingData* const binding_data =
+      env->AddBindingData<BindingData>(context, target);
+  if (binding_data == nullptr) return;
 
   env->SetMethod(target, "access", Access);
   env->SetMethod(target, "close", Close);
@@ -2327,7 +2497,6 @@ void Initialize(Local<Object> target,
 
   env->SetMethod(target, "chmod", Chmod);
   env->SetMethod(target, "fchmod", FChmod);
-  // env->SetMethod(target, "lchmod", LChmod);
 
   env->SetMethod(target, "chown", Chown);
   env->SetMethod(target, "fchown", FChown);
@@ -2335,6 +2504,7 @@ void Initialize(Local<Object> target,
 
   env->SetMethod(target, "utimes", UTimes);
   env->SetMethod(target, "futimes", FUTimes);
+  env->SetMethod(target, "lutimes", LUTimes);
 
   env->SetMethod(target, "mkdtemp", Mkdtemp);
 
@@ -2346,14 +2516,6 @@ void Initialize(Local<Object> target,
                 static_cast<int32_t>(FsStatsOffset::kFsStatsFieldsNumber)))
       .Check();
 
-  target->Set(context,
-              FIXED_ONE_BYTE_STRING(isolate, "statValues"),
-              binding_data->stats_field_array.GetJSArray()).Check();
-
-  target->Set(context,
-              FIXED_ONE_BYTE_STRING(isolate, "bigintStatValues"),
-              binding_data->stats_field_bigint_array.GetJSArray()).Check();
-
   StatWatcher::Initialize(env, target);
 
   // Create FunctionTemplate for FSReqCallback
@@ -2361,13 +2523,7 @@ void Initialize(Local<Object> target,
   fst->InstanceTemplate()->SetInternalFieldCount(
       FSReqBase::kInternalFieldCount);
   fst->Inherit(AsyncWrap::GetConstructorTemplate(env));
-  Local<String> wrapString =
-      FIXED_ONE_BYTE_STRING(isolate, "FSReqCallback");
-  fst->SetClassName(wrapString);
-  target
-      ->Set(context, wrapString,
-            fst->GetFunction(env->context()).ToLocalChecked())
-      .Check();
+  env->SetConstructorFunction(target, "FSReqCallback", fst);
 
   // Create FunctionTemplate for FileHandleReadWrap. There’s no need
   // to do anything in the constructor, so we only store the instance template.
@@ -2397,15 +2553,9 @@ void Initialize(Local<Object> target,
   env->SetProtoMethod(fd, "close", FileHandle::Close);
   env->SetProtoMethod(fd, "releaseFD", FileHandle::ReleaseFD);
   Local<ObjectTemplate> fdt = fd->InstanceTemplate();
-  fdt->SetInternalFieldCount(StreamBase::kInternalFieldCount);
-  Local<String> handleString =
-       FIXED_ONE_BYTE_STRING(isolate, "FileHandle");
-  fd->SetClassName(handleString);
+  fdt->SetInternalFieldCount(FileHandle::kInternalFieldCount);
   StreamBase::AddMethods(env, fd);
-  target
-      ->Set(context, handleString,
-            fd->GetFunction(env->context()).ToLocalChecked())
-      .Check();
+  env->SetConstructorFunction(target, "FileHandle", fd);
   env->set_fd_constructor_template(fdt);
 
   // Create FunctionTemplate for FileHandle::CloseReq
@@ -2426,8 +2576,64 @@ void Initialize(Local<Object> target,
               use_promises_symbol).Check();
 }
 
+BindingData* FSReqBase::binding_data() {
+  return binding_data_.get();
+}
+
+void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+  registry->Register(Access);
+  StatWatcher::RegisterExternalReferences(registry);
+
+  registry->Register(Close);
+  registry->Register(Open);
+  registry->Register(OpenFileHandle);
+  registry->Register(Read);
+  registry->Register(ReadBuffers);
+  registry->Register(Fdatasync);
+  registry->Register(Fsync);
+  registry->Register(Rename);
+  registry->Register(FTruncate);
+  registry->Register(RMDir);
+  registry->Register(MKDir);
+  registry->Register(ReadDir);
+  registry->Register(InternalModuleReadJSON);
+  registry->Register(InternalModuleStat);
+  registry->Register(Stat);
+  registry->Register(LStat);
+  registry->Register(FStat);
+  registry->Register(Link);
+  registry->Register(Symlink);
+  registry->Register(ReadLink);
+  registry->Register(Unlink);
+  registry->Register(WriteBuffer);
+  registry->Register(WriteBuffers);
+  registry->Register(WriteString);
+  registry->Register(RealPath);
+  registry->Register(CopyFile);
+
+  registry->Register(Chmod);
+  registry->Register(FChmod);
+
+  registry->Register(Chown);
+  registry->Register(FChown);
+  registry->Register(LChown);
+
+  registry->Register(UTimes);
+  registry->Register(FUTimes);
+  registry->Register(LUTimes);
+
+  registry->Register(Mkdtemp);
+  registry->Register(NewFSReqCallback);
+
+  registry->Register(FileHandle::New);
+  registry->Register(FileHandle::Close);
+  registry->Register(FileHandle::ReleaseFD);
+  StreamBase::RegisterExternalReferences(registry);
+}
+
 }  // namespace fs
 
 }  // end namespace node
 
 NODE_MODULE_CONTEXT_AWARE_INTERNAL(fs, node::fs::Initialize)
+NODE_MODULE_EXTERNAL_REFERENCE(fs, node::fs::RegisterExternalReferences)

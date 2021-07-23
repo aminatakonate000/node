@@ -20,6 +20,7 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "udp_wrap.h"
+#include "allocated_buffer-inl.h"
 #include "env-inl.h"
 #include "node_buffer.h"
 #include "node_sockaddr-inl.h"
@@ -42,7 +43,6 @@ using v8::Object;
 using v8::PropertyAttribute;
 using v8::ReadOnly;
 using v8::Signature;
-using v8::String;
 using v8::Uint32;
 using v8::Undefined;
 using v8::Value;
@@ -133,9 +133,6 @@ void UDPWrap::Initialize(Local<Object> target,
   Local<FunctionTemplate> t = env->NewFunctionTemplate(New);
   t->InstanceTemplate()->SetInternalFieldCount(
       UDPWrapBase::kInternalFieldCount);
-  Local<String> udpString =
-      FIXED_ONE_BYTE_STRING(env->isolate(), "UDP");
-  t->SetClassName(udpString);
 
   enum PropertyAttribute attributes =
       static_cast<PropertyAttribute>(ReadOnly | DontDelete);
@@ -145,7 +142,7 @@ void UDPWrap::Initialize(Local<Object> target,
   Local<FunctionTemplate> get_fd_templ =
       FunctionTemplate::New(env->isolate(),
                             UDPWrap::GetFD,
-                            env->current_callback_data(),
+                            Local<Value>(),
                             signature);
 
   t->PrototypeTemplate()->SetAccessorProperty(env->fd_string(),
@@ -181,9 +178,7 @@ void UDPWrap::Initialize(Local<Object> target,
 
   t->Inherit(HandleWrap::GetConstructorTemplate(env));
 
-  target->Set(env->context(),
-              udpString,
-              t->GetFunction(env->context()).ToLocalChecked()).Check();
+  env->SetConstructorFunction(target, "UDP", t);
   env->set_udp_constructor_function(
       t->GetFunction(env->context()).ToLocalChecked());
 
@@ -191,15 +186,11 @@ void UDPWrap::Initialize(Local<Object> target,
   Local<FunctionTemplate> swt =
       BaseObject::MakeLazilyInitializedJSTemplate(env);
   swt->Inherit(AsyncWrap::GetConstructorTemplate(env));
-  Local<String> sendWrapString =
-      FIXED_ONE_BYTE_STRING(env->isolate(), "SendWrap");
-  swt->SetClassName(sendWrapString);
-  target->Set(env->context(),
-              sendWrapString,
-              swt->GetFunction(env->context()).ToLocalChecked()).Check();
+  env->SetConstructorFunction(target, "SendWrap", swt);
 
   Local<Object> constants = Object::New(env->isolate());
   NODE_DEFINE_CONSTANT(constants, UV_UDP_IPV6ONLY);
+  NODE_DEFINE_CONSTANT(constants, UV_UDP_REUSEADDR);
   target->Set(context,
               env->constants_string(),
               constants).Check();
@@ -228,12 +219,12 @@ int sockaddr_for_family(int address_family,
                         const unsigned short port,
                         struct sockaddr_storage* addr) {
   switch (address_family) {
-  case AF_INET:
-    return uv_ip4_addr(address, port, reinterpret_cast<sockaddr_in*>(addr));
-  case AF_INET6:
-    return uv_ip6_addr(address, port, reinterpret_cast<sockaddr_in6*>(addr));
-  default:
-    CHECK(0 && "unexpected address family");
+    case AF_INET:
+      return uv_ip4_addr(address, port, reinterpret_cast<sockaddr_in*>(addr));
+    case AF_INET6:
+      return uv_ip6_addr(address, port, reinterpret_cast<sockaddr_in6*>(addr));
+    default:
+      CHECK(0 && "unexpected address family");
   }
 }
 
@@ -540,7 +531,7 @@ void UDPWrap::DoSend(const FunctionCallbackInfo<Value>& args, int family) {
     wrap->current_send_has_callback_ =
         sendto ? args[5]->IsTrue() : args[3]->IsTrue();
 
-    err = wrap->Send(*bufs, count, addr);
+    err = static_cast<int>(wrap->Send(*bufs, count, addr));
 
     wrap->current_send_req_wrap_.Clear();
     wrap->current_send_has_callback_ = false;
@@ -688,7 +679,7 @@ void UDPWrap::OnAlloc(uv_handle_t* handle,
 }
 
 uv_buf_t UDPWrap::OnAlloc(size_t suggested_size) {
-  return env()->AllocateManaged(suggested_size).release();
+  return AllocatedBuffer::AllocateManaged(env(), suggested_size).release();
 }
 
 void UDPWrap::OnRecv(uv_udp_t* handle,
@@ -714,11 +705,10 @@ void UDPWrap::OnRecv(ssize_t nread,
   Context::Scope context_scope(env->context());
 
   Local<Value> argv[] = {
-    Integer::New(env->isolate(), nread),
-    object(),
-    Undefined(env->isolate()),
-    Undefined(env->isolate())
-  };
+      Integer::New(env->isolate(), static_cast<int32_t>(nread)),
+      object(),
+      Undefined(env->isolate()),
+      Undefined(env->isolate())};
 
   if (nread < 0) {
     MakeCallback(env->onmessage_string(), arraysize(argv), argv);

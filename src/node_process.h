@@ -8,8 +8,7 @@
 namespace node {
 
 v8::MaybeLocal<v8::Object> CreateEnvVarProxy(v8::Local<v8::Context> context,
-                                             v8::Isolate* isolate,
-                                             v8::Local<v8::Object> data);
+                                             v8::Isolate* isolate);
 
 // Most of the time, it's best to use `console.error` to write
 // to the process.stderr stream.  However, in some cases, such as
@@ -26,7 +25,10 @@ v8::Maybe<bool> ProcessEmitWarningGeneric(Environment* env,
                                           const char* type = nullptr,
                                           const char* code = nullptr);
 
-v8::Maybe<bool> ProcessEmitWarning(Environment* env, const char* fmt, ...);
+template <typename... Args>
+inline v8::Maybe<bool> ProcessEmitWarning(Environment* env,
+                                          const char* fmt,
+                                          Args&&... args);
 v8::Maybe<bool> ProcessEmitExperimentalWarning(Environment* env,
                                               const char* warning);
 v8::Maybe<bool> ProcessEmitDeprecationWarning(Environment* env,

@@ -1,20 +1,26 @@
 'use strict';
 
 const common = require('../common');
-const { Writable, Readable, Transform, finished } = require('stream');
+const {
+  Writable,
+  Readable,
+  Transform,
+  finished,
+  Duplex,
+  PassThrough
+} = require('stream');
 const assert = require('assert');
 const EE = require('events');
 const fs = require('fs');
 const { promisify } = require('util');
+const http = require('http');
 
 {
   const rs = new Readable({
     read() {}
   });
 
-  finished(rs, common.mustCall((err) => {
-    assert(!err, 'no error');
-  }));
+  finished(rs, common.mustSucceed());
 
   rs.push(null);
   rs.resume();
@@ -27,9 +33,7 @@ const { promisify } = require('util');
     }
   });
 
-  finished(ws, common.mustCall((err) => {
-    assert(!err, 'no error');
-  }));
+  finished(ws, common.mustSucceed());
 
   ws.end();
 }
@@ -52,8 +56,7 @@ const { promisify } = require('util');
     finish = true;
   });
 
-  finished(tr, common.mustCall((err) => {
-    assert(!err, 'no error');
+  finished(tr, common.mustSucceed(() => {
     assert(finish);
     assert(ended);
   }));
@@ -90,6 +93,83 @@ const { promisify } = require('util');
 }
 
 {
+  // Check pre-cancelled
+  const signal = new EventTarget();
+  signal.aborted = true;
+
+  const rs = Readable.from((function* () {})());
+  finished(rs, { signal }, common.mustCall((err) => {
+    assert.strictEqual(err.name, 'AbortError');
+  }));
+}
+
+{
+  // Check cancelled before the stream ends sync.
+  const ac = new AbortController();
+  const { signal } = ac;
+
+  const rs = Readable.from((function* () {})());
+  finished(rs, { signal }, common.mustCall((err) => {
+    assert.strictEqual(err.name, 'AbortError');
+  }));
+
+  ac.abort();
+}
+
+{
+  // Check cancelled before the stream ends async.
+  const ac = new AbortController();
+  const { signal } = ac;
+
+  const rs = Readable.from((function* () {})());
+  setTimeout(() => ac.abort(), 1);
+  finished(rs, { signal }, common.mustCall((err) => {
+    assert.strictEqual(err.name, 'AbortError');
+  }));
+}
+
+{
+  // Check cancelled after doesn't throw.
+  const ac = new AbortController();
+  const { signal } = ac;
+
+  const rs = Readable.from((function* () {
+    yield 5;
+    setImmediate(() => ac.abort());
+  })());
+  rs.resume();
+  finished(rs, { signal }, common.mustSucceed());
+}
+
+{
+  // Promisified abort works
+  const finishedPromise = promisify(finished);
+  async function run() {
+    const ac = new AbortController();
+    const { signal } = ac;
+    const rs = Readable.from((function* () {})());
+    setImmediate(() => ac.abort());
+    await finishedPromise(rs, { signal });
+  }
+
+  assert.rejects(run, { name: 'AbortError' }).then(common.mustCall());
+}
+
+{
+  // Promisified pre-aborted works
+  const finishedPromise = promisify(finished);
+  async function run() {
+    const signal = new EventTarget();
+    signal.aborted = true;
+    const rs = Readable.from((function* () {})());
+    await finishedPromise(rs, { signal });
+  }
+
+  assert.rejects(run, { name: 'AbortError' }).then(common.mustCall());
+}
+
+
+{
   const rs = fs.createReadStream('file-does-not-exist');
 
   finished(rs, common.expectsError({
@@ -100,9 +180,7 @@ const { promisify } = require('util');
 {
   const rs = new Readable();
 
-  finished(rs, common.mustCall((err) => {
-    assert(!err, 'no error');
-  }));
+  finished(rs, common.mustSucceed());
 
   rs.push(null);
   rs.emit('close'); // Should not trigger an error
@@ -138,7 +216,7 @@ const { promisify } = require('util');
     () => finished(rs, 'foo', () => {}),
     {
       code: 'ERR_INVALID_ARG_TYPE',
-      message: /opts/
+      message: /options/
     }
   );
   assert.throws(
@@ -337,7 +415,7 @@ testClosed((opts) => new Writable({ write() {}, ...opts }));
   d._writableState = {};
   d._writableState.finished = true;
   finished(d, { readable: false, writable: true }, common.mustCall((err) => {
-    assert.strictEqual(err, undefined);
+    assert.strictEqual(err.code, 'ERR_STREAM_PREMATURE_CLOSE');
   }));
   d._writableState.errored = true;
   d.emit('close');
@@ -351,4 +429,204 @@ testClosed((opts) => new Writable({ write() {}, ...opts }));
   r.push('asd');
   r.push(null);
   r.destroy();
+}
+
+{
+  const d = new Duplex({
+    final(cb) { }, // Never close writable side for test purpose
+    read() {
+      this.push(null);
+    }
+  });
+
+  d.on('end', common.mustCall());
+
+  finished(d, { readable: true, writable: false }, common.mustCall());
+
+  d.end();
+  d.resume();
+}
+
+{
+  const d = new Duplex({
+    final(cb) { }, // Never close writable side for test purpose
+    read() {
+      this.push(null);
+    }
+  });
+
+  d.on('end', common.mustCall());
+
+  d.end();
+  finished(d, { readable: true, writable: false }, common.mustCall());
+
+  d.resume();
+}
+
+{
+  // Test for compat for e.g. fd-slicer which implements
+  // non standard destroy behavior which might not emit
+  // 'close'.
+  const r = new Readable();
+  finished(r, common.mustCall());
+  r.resume();
+  r.push('asd');
+  r.destroyed = true;
+  r.push(null);
+}
+
+{
+  // Regression https://github.com/nodejs/node/issues/33130
+  const response = new PassThrough();
+
+  class HelloWorld extends Duplex {
+    constructor(response) {
+      super({
+        autoDestroy: false
+      });
+
+      this.response = response;
+      this.readMore = false;
+
+      response.once('end', () => {
+        this.push(null);
+      });
+
+      response.on('readable', () => {
+        if (this.readMore) {
+          this._read();
+        }
+      });
+    }
+
+    _read() {
+      const { response } = this;
+
+      this.readMore = true;
+
+      if (response.readableLength) {
+        this.readMore = false;
+      }
+
+      let data;
+      while ((data = response.read()) !== null) {
+        this.push(data);
+      }
+    }
+  }
+
+  const instance = new HelloWorld(response);
+  instance.setEncoding('utf8');
+  instance.end();
+
+  (async () => {
+    await EE.once(instance, 'finish');
+
+    setImmediate(() => {
+      response.write('chunk 1');
+      response.write('chunk 2');
+      response.write('chunk 3');
+      response.end();
+    });
+
+    let res = '';
+    for await (const data of instance) {
+      res += data;
+    }
+
+    assert.strictEqual(res, 'chunk 1chunk 2chunk 3');
+  })().then(common.mustCall());
+}
+
+{
+  const p = new PassThrough();
+  p.end();
+  finished(p, common.mustNotCall());
+}
+
+{
+  const p = new PassThrough();
+  p.end();
+  p.on('finish', common.mustCall(() => {
+    finished(p, common.mustNotCall());
+  }));
+}
+
+{
+  const server = http.createServer(common.mustCall((req, res) => {
+    res.on('close', common.mustCall(() => {
+      finished(res, common.mustCall(() => {
+        server.close();
+      }));
+    }));
+    res.end();
+  }))
+  .listen(0, function() {
+    http.request({
+      method: 'GET',
+      port: this.address().port
+    }).end()
+      .on('response', common.mustCall());
+  });
+}
+
+{
+  const server = http.createServer(common.mustCall((req, res) => {
+    req.on('close', common.mustCall(() => {
+      finished(req, common.mustCall(() => {
+        server.close();
+      }));
+    }));
+    req.destroy();
+  })).listen(0, function() {
+    http.request({
+      method: 'GET',
+      port: this.address().port
+    }).end().on('error', common.mustCall());
+  });
+}
+
+{
+  const w = new Writable({
+    write(chunk, encoding, callback) {
+      process.nextTick(callback);
+    }
+  });
+  w.aborted = false;
+  w.end();
+  let closed = false;
+  w.on('finish', () => {
+    assert.strictEqual(closed, false);
+    w.emit('aborted');
+  });
+  w.on('close', common.mustCall(() => {
+    closed = true;
+  }));
+
+  finished(w, common.mustCall(() => {
+    assert.strictEqual(closed, true);
+  }));
+}
+
+{
+  const w = new Writable();
+  const _err = new Error();
+  w.destroy(_err);
+  finished(w, common.mustCall((err) => {
+    assert.strictEqual(_err, err);
+    finished(w, common.mustCall((err) => {
+      assert.strictEqual(_err, err);
+    }));
+  }));
+}
+
+{
+  const w = new Writable();
+  w.destroy();
+  finished(w, common.mustCall((err) => {
+    assert.strictEqual(err.code, 'ERR_STREAM_PREMATURE_CLOSE');
+    finished(w, common.mustCall((err) => {
+      assert.strictEqual(err.code, 'ERR_STREAM_PREMATURE_CLOSE');
+    }));
+  }));
 }

@@ -24,7 +24,7 @@ static const int kMaxAsyncTaskStacks = 128 * 1024;
 static const int kNoBreakpointId = 0;
 
 template <typename Map>
-void cleanupExpiredWeakPointers(Map& map) {  // NOLINT(runtime/references)
+void cleanupExpiredWeakPointers(Map& map) {
   for (auto it = map.begin(); it != map.end();) {
     if (it->second.expired()) {
       it = map.erase(it);
@@ -43,8 +43,10 @@ class MatchPrototypePredicate : public v8::debug::QueryObjectPredicate {
 
   bool Filter(v8::Local<v8::Object> object) override {
     if (object->IsModuleNamespaceObject()) return false;
-    v8::Local<v8::Context> objectContext =
-        v8::debug::GetCreationContext(object);
+    v8::Local<v8::Context> objectContext;
+    if (!v8::debug::GetCreationContext(object).ToLocal(&objectContext)) {
+      return false;
+    }
     if (objectContext != m_context) return false;
     if (!m_inspector->client()->isInspectableHeapObject(object)) return false;
     // Get prototype chain for current object until first visited prototype.
@@ -63,42 +65,6 @@ class MatchPrototypePredicate : public v8::debug::QueryObjectPredicate {
 };
 
 }  // namespace
-
-V8DebuggerId::V8DebuggerId(std::pair<int64_t, int64_t> pair)
-    : m_first(pair.first), m_second(pair.second) {}
-
-// static
-V8DebuggerId V8DebuggerId::generate(v8::Isolate* isolate) {
-  V8DebuggerId debuggerId;
-  debuggerId.m_first = v8::debug::GetNextRandomInt64(isolate);
-  debuggerId.m_second = v8::debug::GetNextRandomInt64(isolate);
-  if (!debuggerId.m_first && !debuggerId.m_second) ++debuggerId.m_first;
-  return debuggerId;
-}
-
-V8DebuggerId::V8DebuggerId(const String16& debuggerId) {
-  const UChar dot = '.';
-  size_t pos = debuggerId.find(dot);
-  if (pos == String16::kNotFound) return;
-  bool ok = false;
-  int64_t first = debuggerId.substring(0, pos).toInteger64(&ok);
-  if (!ok) return;
-  int64_t second = debuggerId.substring(pos + 1).toInteger64(&ok);
-  if (!ok) return;
-  m_first = first;
-  m_second = second;
-}
-
-String16 V8DebuggerId::toString() const {
-  return String16::fromInteger64(m_first) + "." +
-         String16::fromInteger64(m_second);
-}
-
-bool V8DebuggerId::isValid() const { return m_first || m_second; }
-
-std::pair<int64_t, int64_t> V8DebuggerId::pair() const {
-  return std::make_pair(m_first, m_second);
-}
 
 V8Debugger::V8Debugger(v8::Isolate* isolate, V8InspectorImpl* inspector)
     : m_isolate(isolate),
@@ -124,6 +90,9 @@ void V8Debugger::enable() {
   m_isolate->AddNearHeapLimitCallback(&V8Debugger::nearHeapLimitCallback, this);
   v8::debug::ChangeBreakOnException(m_isolate, v8::debug::NoBreakOnException);
   m_pauseOnExceptionsState = v8::debug::NoBreakOnException;
+#if V8_ENABLE_WEBASSEMBLY
+  v8::debug::TierDownAllModulesPerIsolate(m_isolate);
+#endif  // V8_ENABLE_WEBASSEMBLY
 }
 
 void V8Debugger::disable() {
@@ -146,6 +115,9 @@ void V8Debugger::disable() {
   m_taskWithScheduledBreakPauseRequested = false;
   m_pauseOnNextCallRequested = false;
   m_pauseOnAsyncCall = false;
+#if V8_ENABLE_WEBASSEMBLY
+  v8::debug::TierUpAllModulesPerIsolate(m_isolate);
+#endif  // V8_ENABLE_WEBASSEMBLY
   v8::debug::SetDebugDelegate(m_isolate, nullptr);
   m_isolate->RemoveNearHeapLimitCallback(&V8Debugger::nearHeapLimitCallback,
                                          m_originalHeapLimit);
@@ -223,7 +195,7 @@ void V8Debugger::setPauseOnNextCall(bool pause, int targetContextGroupId) {
 }
 
 bool V8Debugger::canBreakProgram() {
-  return !v8::debug::AllFramesOnStackAreBlackboxed(m_isolate);
+  return !v8::debug::CanBreakProgram(m_isolate);
 }
 
 void V8Debugger::breakProgram(int targetContextGroupId) {
@@ -245,9 +217,15 @@ void V8Debugger::interruptAndBreak(int targetContextGroupId) {
       nullptr);
 }
 
-void V8Debugger::continueProgram(int targetContextGroupId) {
+void V8Debugger::continueProgram(int targetContextGroupId,
+                                 bool terminateOnResume) {
   if (m_pausedContextGroupId != targetContextGroupId) return;
-  if (isPaused()) m_inspector->client()->quitMessageLoopOnPause();
+  if (isPaused()) {
+    if (terminateOnResume) {
+      v8::debug::SetTerminateOnResume(m_isolate);
+    }
+    m_inspector->client()->quitMessageLoopOnPause();
+  }
 }
 
 void V8Debugger::breakProgramOnAssert(int targetContextGroupId) {
@@ -295,7 +273,10 @@ bool V8Debugger::asyncStepOutOfFunction(int targetContextGroupId,
                                         bool onlyAtReturn) {
   v8::HandleScope handleScope(m_isolate);
   auto iterator = v8::debug::StackTraceIterator::Create(m_isolate);
-  CHECK(!iterator->Done());
+  // When stepping through extensions code, it is possible that the
+  // iterator doesn't have any frames, since we exclude all frames
+  // that correspond to extension scripts.
+  if (iterator->Done()) return false;
   bool atReturn = !iterator->GetReturnValue().IsEmpty();
   iterator->Advance();
   // Synchronous stack has more then one frame.
@@ -328,8 +309,8 @@ void V8Debugger::terminateExecution(
     std::unique_ptr<TerminateExecutionCallback> callback) {
   if (m_terminateExecutionCallback) {
     if (callback) {
-      callback->sendFailure(
-          Response::Error("There is current termination request in progress"));
+      callback->sendFailure(Response::ServerError(
+          "There is current termination request in progress"));
     }
     return;
   }
@@ -383,9 +364,9 @@ Response V8Debugger::continueToLocation(
     }
     continueProgram(targetContextGroupId);
     // TODO(kozyatinskiy): Return actual line and column number.
-    return Response::OK();
+    return Response::Success();
   } else {
-    return Response::Error("Cannot continue to specified location");
+    return Response::ServerError("Cannot continue to specified location");
   }
 }
 
@@ -491,6 +472,10 @@ size_t HeapLimitForDebugging(size_t initial_heap_limit) {
 size_t V8Debugger::nearHeapLimitCallback(void* data, size_t current_heap_limit,
                                          size_t initial_heap_limit) {
   V8Debugger* thisPtr = static_cast<V8Debugger*>(data);
+// TODO(solanes, v8:10876): Remove when bug is solved.
+#if DEBUG
+  printf("nearHeapLimitCallback\n");
+#endif
   thisPtr->m_originalHeapLimit = current_heap_limit;
   thisPtr->m_scheduledOOMBreak = true;
   v8::Local<v8::Context> context =
@@ -561,6 +546,27 @@ bool V8Debugger::IsFunctionBlackboxed(v8::Local<v8::debug::Script> script,
   return hasAgents && allBlackboxed;
 }
 
+bool V8Debugger::ShouldBeSkipped(v8::Local<v8::debug::Script> script, int line,
+                                 int column) {
+  int contextId;
+  if (!script->ContextId().To(&contextId)) return false;
+
+  bool hasAgents = false;
+  bool allShouldBeSkipped = true;
+  String16 scriptId = String16::fromInteger(script->Id());
+  m_inspector->forEachSession(
+      m_inspector->contextGroupId(contextId),
+      [&hasAgents, &allShouldBeSkipped, &scriptId, line,
+       column](V8InspectorSessionImpl* session) {
+        V8DebuggerAgentImpl* agent = session->debuggerAgent();
+        if (!agent->enabled()) return;
+        hasAgents = true;
+        const bool skip = agent->shouldBeSkipped(scriptId, line, column);
+        allShouldBeSkipped &= skip;
+      });
+  return hasAgents && allShouldBeSkipped;
+}
+
 void V8Debugger::AsyncEventOccurred(v8::debug::DebugAsyncActionType type,
                                     int id, bool isBlackboxed) {
   // Async task events from Promises are given misaligned pointers to prevent
@@ -621,7 +627,7 @@ v8::MaybeLocal<v8::Value> V8Debugger::getTargetScopes(
   switch (kind) {
     case FUNCTION:
       iterator = v8::debug::ScopeIterator::CreateForFunction(
-          m_isolate, v8::Local<v8::Function>::Cast(value));
+          m_isolate, value.As<v8::Function>());
       break;
     case GENERATOR:
       v8::Local<v8::debug::GeneratorObject> generatorObject =
@@ -629,7 +635,7 @@ v8::MaybeLocal<v8::Value> V8Debugger::getTargetScopes(
       if (!generatorObject->IsSuspended()) return v8::MaybeLocal<v8::Value>();
 
       iterator = v8::debug::ScopeIterator::CreateForGeneratorObject(
-          m_isolate, v8::Local<v8::Object>::Cast(value));
+          m_isolate, value.As<v8::Object>());
       break;
   }
   if (!iterator) return v8::MaybeLocal<v8::Value>();
@@ -673,6 +679,9 @@ v8::MaybeLocal<v8::Value> V8Debugger::getTargetScopes(
         break;
       case v8::debug::ScopeIterator::ScopeTypeModule:
         description = "Module" + nameSuffix;
+        break;
+      case v8::debug::ScopeIterator::ScopeTypeWasmExpressionStack:
+        description = "Wasm Expression Stack" + nameSuffix;
         break;
     }
     v8::Local<v8::Object> object = iterator->GetObject();
@@ -1075,7 +1084,7 @@ void V8Debugger::setMaxAsyncTaskStacksForTest(int limit) {
 V8DebuggerId V8Debugger::debuggerIdFor(int contextGroupId) {
   auto it = m_contextGroupIdToDebuggerId.find(contextGroupId);
   if (it != m_contextGroupIdToDebuggerId.end()) return it->second;
-  V8DebuggerId debuggerId = V8DebuggerId::generate(m_isolate);
+  V8DebuggerId debuggerId = V8DebuggerId::generate(m_inspector);
   m_contextGroupIdToDebuggerId.insert(
       it, std::make_pair(contextGroupId, debuggerId));
   return debuggerId;

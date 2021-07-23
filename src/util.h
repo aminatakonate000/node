@@ -24,18 +24,9 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
-#if (__GNUC__ >= 8) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-function-type"
-#endif
 #include "v8.h"
-#if (__GNUC__ >= 8) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
-#include <cassert>
-#include <climits>  // PATH_MAX
-#include <csignal>
+#include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -328,6 +319,16 @@ inline bool StringEqualNoCase(const char* a, const char* b);
 // strncasecmp() is locale-sensitive.  Use StringEqualNoCaseN() instead.
 inline bool StringEqualNoCaseN(const char* a, const char* b, size_t length);
 
+template <typename T, size_t N>
+constexpr size_t arraysize(const T (&)[N]) {
+  return N;
+}
+
+template <typename T, size_t N>
+constexpr size_t strsize(const T (&)[N]) {
+  return N - 1;
+}
+
 // Allocates an array of member type T. For up to kStackStorageSize items,
 // the stack is used, otherwise malloc().
 template <typename T, size_t kStackStorageSize = 1024>
@@ -367,8 +368,7 @@ class MaybeStackBuffer {
   // Current maximum capacity of the buffer with which SetLength() can be used
   // without first calling AllocateSufficientStorage().
   size_t capacity() const {
-    return IsAllocated() ? capacity_ :
-                           IsInvalidated() ? 0 : kStackStorageSize;
+    return capacity_;
   }
 
   // Make sure enough space for `storage` entries is available.
@@ -404,12 +404,13 @@ class MaybeStackBuffer {
     buf_[length] = T();
   }
 
-  // Make derefencing this object return nullptr.
+  // Make dereferencing this object return nullptr.
   // This method can be called multiple times throughout the lifetime of the
   // buffer, but once this has been called AllocateSufficientStorage() cannot
   // be used.
   void Invalidate() {
     CHECK(!IsAllocated());
+    capacity_ = 0;
     length_ = 0;
     buf_ = nullptr;
   }
@@ -430,10 +431,11 @@ class MaybeStackBuffer {
     CHECK(IsAllocated());
     buf_ = buf_st_;
     length_ = 0;
-    capacity_ = 0;
+    capacity_ = arraysize(buf_st_);
   }
 
-  MaybeStackBuffer() : length_(0), capacity_(0), buf_(buf_st_) {
+  MaybeStackBuffer()
+      : length_(0), capacity_(arraysize(buf_st_)), buf_(buf_st_) {
     // Default to a zero-length, null-terminated buffer.
     buf_[0] = T();
   }
@@ -482,6 +484,10 @@ class Utf8Value : public MaybeStackBuffer<char> {
   explicit Utf8Value(v8::Isolate* isolate, v8::Local<v8::Value> value);
 
   inline std::string ToString() const { return std::string(out(), length()); }
+
+  inline bool operator==(const char* a) const {
+    return strcmp(out(), a) == 0;
+  }
 };
 
 class TwoByteValue : public MaybeStackBuffer<uint16_t> {
@@ -560,6 +566,11 @@ struct MallocedBuffer {
     size = new_size;
   }
 
+  void Realloc(size_t new_size) {
+    Truncate(new_size);
+    data = UncheckedRealloc(data, new_size);
+  }
+
   inline bool is_empty() const { return data == nullptr; }
 
   MallocedBuffer() : data(nullptr), size(0) {}
@@ -589,6 +600,15 @@ class NonCopyableMaybe {
 
   bool IsEmpty() const {
     return empty_;
+  }
+
+  const T* get() const {
+    return empty_ ? nullptr : &value_;
+  }
+
+  const T* operator->() const {
+    CHECK(!empty_);
+    return &value_;
   }
 
   T&& Release() {
@@ -672,11 +692,9 @@ inline v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
   do {                                                                         \
     v8::Isolate* isolate = target->GetIsolate();                               \
     v8::Local<v8::String> constant_name =                                      \
-        v8::String::NewFromUtf8(isolate, name, v8::NewStringType::kNormal)     \
-            .ToLocalChecked();                                                 \
+        v8::String::NewFromUtf8(isolate, name).ToLocalChecked();               \
     v8::Local<v8::String> constant_value =                                     \
-        v8::String::NewFromUtf8(isolate, constant, v8::NewStringType::kNormal) \
-            .ToLocalChecked();                                                 \
+        v8::String::NewFromUtf8(isolate, constant).ToLocalChecked();           \
     v8::PropertyAttribute constant_attributes =                                \
         static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontDelete);     \
     target                                                                     \
@@ -709,15 +727,17 @@ inline bool IsBigEndian() {
   return GetEndianness() == kBigEndian;
 }
 
-template <typename T, size_t N>
-constexpr size_t arraysize(const T (&)[N]) {
-  return N;
-}
-
 // Round up a to the next highest multiple of b.
 template <typename T>
 constexpr T RoundUp(T a, T b) {
   return a % b != 0 ? a + b - (a % b) : a;
+}
+
+// Align ptr to an `alignment`-bytes boundary.
+template <typename T, typename U>
+constexpr T* AlignUp(T* ptr, U alignment) {
+  return reinterpret_cast<T*>(
+      RoundUp(reinterpret_cast<uintptr_t>(ptr), alignment));
 }
 
 class SlicedArguments : public MaybeStackBuffer<v8::Local<v8::Value>> {
@@ -752,6 +772,7 @@ class PersistentToLocal {
   template <class TypeName>
   static inline v8::Local<TypeName> Strong(
       const v8::PersistentBase<TypeName>& persistent) {
+    DCHECK(!persistent.IsWeak());
     return *reinterpret_cast<v8::Local<TypeName>*>(
         const_cast<v8::PersistentBase<TypeName>*>(&persistent));
   }
@@ -764,6 +785,38 @@ class PersistentToLocal {
   }
 };
 
+// Can be used as a key for std::unordered_map when lookup performance is more
+// important than size and the keys are statically used to avoid redundant hash
+// computations.
+class FastStringKey {
+ public:
+  constexpr explicit FastStringKey(const char* name);
+
+  struct Hash {
+    constexpr size_t operator()(const FastStringKey& key) const;
+  };
+  constexpr bool operator==(const FastStringKey& other) const;
+
+  constexpr const char* c_str() const;
+
+ private:
+  static constexpr size_t HashImpl(const char* str);
+
+  const char* name_;
+  size_t cached_hash_;
+};
+
+// Like std::static_pointer_cast but for unique_ptr with the default deleter.
+template <typename T, typename U>
+std::unique_ptr<T> static_unique_pointer_cast(std::unique_ptr<U>&& ptr) {
+  return std::unique_ptr<T>(static_cast<T*>(ptr.release()));
+}
+
+#define MAYBE_FIELD_PTR(ptr, field) ptr == nullptr ? nullptr : &(ptr->field)
+
+// Returns a non-zero code if it fails to open or read the file,
+// aborts if it fails to close the file.
+int ReadFileSync(std::string* result, const char* path);
 }  // namespace node
 
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS

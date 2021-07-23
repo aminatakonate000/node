@@ -30,6 +30,8 @@ class AstTraversalVisitor : public AstVisitor<Subclass> {
  public:
   explicit AstTraversalVisitor(Isolate* isolate, AstNode* root = nullptr);
   explicit AstTraversalVisitor(uintptr_t stack_limit, AstNode* root = nullptr);
+  AstTraversalVisitor(const AstTraversalVisitor&) = delete;
+  AstTraversalVisitor& operator=(const AstTraversalVisitor&) = delete;
 
   void Run() {
     DCHECK_NOT_NULL(root_);
@@ -56,8 +58,6 @@ class AstTraversalVisitor : public AstVisitor<Subclass> {
 
   AstNode* root_;
   int depth_;
-
-  DISALLOW_COPY_AND_ASSIGN(AstTraversalVisitor);
 };
 
 // ----------------------------------------------------------------------------
@@ -295,13 +295,6 @@ void AstTraversalVisitor<Subclass>::VisitNativeFunctionLiteral(
 }
 
 template <class Subclass>
-void AstTraversalVisitor<Subclass>::VisitDoExpression(DoExpression* expr) {
-  PROCESS_EXPRESSION(expr);
-  RECURSE(VisitBlock(expr->block()));
-  RECURSE(VisitVariableProxy(expr->result()));
-}
-
-template <class Subclass>
 void AstTraversalVisitor<Subclass>::VisitConditional(Conditional* expr) {
   PROCESS_EXPRESSION(expr);
   RECURSE_EXPRESSION(Visit(expr->condition()));
@@ -476,8 +469,8 @@ void AstTraversalVisitor<Subclass>::VisitClassLiteral(ClassLiteral* expr) {
     RECURSE_EXPRESSION(Visit(expr->extends()));
   }
   RECURSE_EXPRESSION(Visit(expr->constructor()));
-  if (expr->static_fields_initializer() != nullptr) {
-    RECURSE_EXPRESSION(Visit(expr->static_fields_initializer()));
+  if (expr->static_initializer() != nullptr) {
+    RECURSE_EXPRESSION(Visit(expr->static_initializer()));
   }
   if (expr->instance_members_initializer_function() != nullptr) {
     RECURSE_EXPRESSION(Visit(expr->instance_members_initializer_function()));
@@ -513,18 +506,32 @@ void AstTraversalVisitor<Subclass>::VisitInitializeClassMembersStatement(
 }
 
 template <class Subclass>
-void AstTraversalVisitor<Subclass>::VisitSpread(Spread* expr) {
-  PROCESS_EXPRESSION(expr);
-  RECURSE_EXPRESSION(Visit(expr->expression()));
+void AstTraversalVisitor<Subclass>::VisitInitializeClassStaticElementsStatement(
+    InitializeClassStaticElementsStatement* stmt) {
+  PROCESS_NODE(stmt);
+  ZonePtrList<ClassLiteral::StaticElement>* elements = stmt->elements();
+  for (int i = 0; i < elements->length(); ++i) {
+    ClassLiteral::StaticElement* element = elements->at(i);
+    switch (element->kind()) {
+      case ClassLiteral::StaticElement::PROPERTY: {
+        ClassLiteral::Property* prop = element->property();
+        if (!prop->key()->IsLiteral()) {
+          RECURSE(Visit(prop->key()));
+        }
+        RECURSE(Visit(prop->value()));
+        break;
+      }
+      case ClassLiteral::StaticElement::STATIC_BLOCK:
+        RECURSE(Visit(element->static_block()));
+        break;
+    }
+  }
 }
 
 template <class Subclass>
-void AstTraversalVisitor<Subclass>::VisitStoreInArrayLiteral(
-    StoreInArrayLiteral* expr) {
+void AstTraversalVisitor<Subclass>::VisitSpread(Spread* expr) {
   PROCESS_EXPRESSION(expr);
-  RECURSE_EXPRESSION(Visit(expr->array()));
-  RECURSE_EXPRESSION(Visit(expr->index()));
-  RECURSE_EXPRESSION(Visit(expr->value()));
+  RECURSE_EXPRESSION(Visit(expr->expression()));
 }
 
 template <class Subclass>
@@ -552,14 +559,16 @@ template <class Subclass>
 void AstTraversalVisitor<Subclass>::VisitImportCallExpression(
     ImportCallExpression* expr) {
   PROCESS_EXPRESSION(expr);
-  RECURSE_EXPRESSION(Visit(expr->argument()));
+  RECURSE_EXPRESSION(Visit(expr->specifier()));
+  if (expr->import_assertions()) {
+    RECURSE_EXPRESSION(Visit(expr->import_assertions()));
+  }
 }
 
 template <class Subclass>
 void AstTraversalVisitor<Subclass>::VisitSuperPropertyReference(
     SuperPropertyReference* expr) {
   PROCESS_EXPRESSION(expr);
-  RECURSE_EXPRESSION(Visit(expr->home_object()));
 }
 
 template <class Subclass>

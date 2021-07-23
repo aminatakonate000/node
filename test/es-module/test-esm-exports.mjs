@@ -1,6 +1,6 @@
-// Flags: --experimental-modules
 import { mustCall } from '../common/index.mjs';
 import { ok, deepStrictEqual, strictEqual } from 'assert';
+import { sep } from 'path';
 
 import { requireFixture, importFixture } from '../fixtures/pkgexports.mjs';
 import fromInside from '../fixtures/node_modules/pkgexports/lib/hole.js';
@@ -33,6 +33,9 @@ import fromInside from '../fixtures/node_modules/pkgexports/lib/hole.js';
       { default: 'self-cjs' } : { default: 'self-mjs' }],
     // Resolve self sugar
     ['pkgexports-sugar', { default: 'main' }],
+    // Path patterns
+    ['pkgexports/subpath/sub-dir1', { default: 'main' }],
+    ['pkgexports/features/dir1', { default: 'main' }],
   ]);
 
   if (isRequire) {
@@ -41,6 +44,11 @@ import fromInside from '../fixtures/node_modules/pkgexports/lib/hole.js';
     validSpecifiers.set('pkgexports/subpath/dir1/', { default: 'main' });
     validSpecifiers.set('pkgexports/subpath/dir2', { default: 'index' });
     validSpecifiers.set('pkgexports/subpath/dir2/', { default: 'index' });
+  } else {
+    // No exports or main field
+    validSpecifiers.set('no_exports', { default: 'index' });
+    // Main field without extension
+    validSpecifiers.set('default_index', { default: 'main' });
   }
 
   for (const [validSpecifier, expected] of validSpecifiers) {
@@ -64,6 +72,11 @@ import fromInside from '../fixtures/node_modules/pkgexports/lib/hole.js';
     // Conditional exports with no match are "not exported" errors
     ['pkgexports/invalid1', './invalid1'],
     ['pkgexports/invalid4', './invalid4'],
+    // Null mapping
+    ['pkgexports/null', './null'],
+    ['pkgexports/null/subpath', './null/subpath'],
+    // Empty fallback
+    ['pkgexports/nofallback1', './nofallback1'],
   ]);
 
   const invalidExports = new Map([
@@ -74,12 +87,11 @@ import fromInside from '../fixtures/node_modules/pkgexports/lib/hole.js';
     ['pkgexports/belowdir/pkgexports/asdf.js', './belowdir/'],
     // This target file steps below the package
     ['pkgexports/belowfile', './belowfile'],
-    // Invalid target handling
-    ['pkgexports/null', './null'],
+    // Invalid targets
     ['pkgexports/invalid2', './invalid2'],
     ['pkgexports/invalid3', './invalid3'],
+    ['pkgexports/invalid5', 'invalid5'],
     // Missing / invalid fallbacks
-    ['pkgexports/nofallback1', './nofallback1'],
     ['pkgexports/nofallback2', './nofallback2'],
     // Reaching into nested node_modules
     ['pkgexports/nodemodules', './nodemodules'],
@@ -106,13 +118,17 @@ import fromInside from '../fixtures/node_modules/pkgexports/lib/hole.js';
       strictEqual(err.code, 'ERR_INVALID_PACKAGE_TARGET');
       assertStartsWith(err.message, 'Invalid "exports"');
       assertIncludes(err.message, subpath);
+      if (!subpath.startsWith('./')) {
+        assertIncludes(err.message, 'targets must start with');
+      }
     }));
   }
 
   for (const [specifier, subpath] of invalidSpecifiers) {
     loadFixture(specifier).catch(mustCall((err) => {
       strictEqual(err.code, 'ERR_INVALID_MODULE_SPECIFIER');
-      assertStartsWith(err.message, 'Package subpath ');
+      assertStartsWith(err.message, 'Invalid module ');
+      assertIncludes(err.message, 'is not a valid subpath');
       assertIncludes(err.message, subpath);
     }));
   }
@@ -128,30 +144,32 @@ import fromInside from '../fixtures/node_modules/pkgexports/lib/hole.js';
 
   const notFoundExports = new Map([
     // Non-existing file
-    ['pkgexports/sub/not-a-file.js', 'pkgexports/sub/not-a-file.js'],
+    ['pkgexports/sub/not-a-file.js', `pkgexports${sep}not-a-file.js`],
     // No extension lookups
-    ['pkgexports/no-ext', 'pkgexports/no-ext'],
+    ['pkgexports/no-ext', `pkgexports${sep}asdf`],
   ]);
 
   if (!isRequire) {
+    const onDirectoryImport = (err) => {
+      strictEqual(err.code, 'ERR_UNSUPPORTED_DIR_IMPORT');
+      assertStartsWith(err.message, 'Directory import');
+    };
     notFoundExports.set('pkgexports/subpath/file', 'pkgexports/subpath/file');
-    notFoundExports.set('pkgexports/subpath/dir1', 'pkgexports/subpath/dir1');
-    notFoundExports.set('pkgexports/subpath/dir2', 'pkgexports/subpath/dir2');
+    loadFixture('pkgexports/subpath/dir1').catch(mustCall(onDirectoryImport));
+    loadFixture('pkgexports/subpath/dir2').catch(mustCall(onDirectoryImport));
   }
 
   for (const [specifier, request] of notFoundExports) {
     loadFixture(specifier).catch(mustCall((err) => {
       strictEqual(err.code, (isRequire ? '' : 'ERR_') + 'MODULE_NOT_FOUND');
-      // ESM returns a full file path
-      assertStartsWith(err.message, isRequire ?
-        `Cannot find module '${request}'` :
-        'Cannot find module');
+      assertIncludes(err.message, request);
+      assertStartsWith(err.message, 'Cannot find module');
     }));
   }
 
   // The use of %2F escapes in paths fails loading
   loadFixture('pkgexports/sub/..%2F..%2Fbar.js').catch(mustCall((err) => {
-    strictEqual(err.code, 'ERR_INVALID_FILE_URL_PATH');
+    strictEqual(err.code, 'ERR_INVALID_MODULE_SPECIFIER');
   }));
 
   // Package export with numeric index properties must throw a validation error

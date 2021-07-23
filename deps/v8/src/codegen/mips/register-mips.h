@@ -203,7 +203,12 @@ int ToNumber(Register reg);
 
 Register ToRegister(int num);
 
-constexpr bool kPadArguments = false;
+// Returns the number of padding slots needed for stack pointer alignment.
+constexpr int ArgumentPaddingSlots(int argument_count) {
+  // No argument padding required.
+  return 0;
+}
+
 constexpr bool kSimpleFPAliasing = true;
 constexpr bool kSimdMaskRegisters = false;
 
@@ -375,6 +380,8 @@ constexpr Register kRuntimeCallArgCountRegister = a0;
 constexpr Register kRuntimeCallArgvRegister = a2;
 constexpr Register kWasmInstanceRegister = a0;
 constexpr Register kWasmCompileLazyFuncIndexRegister = t0;
+
+constexpr DoubleRegister kFPReturnRegister0 = f0;
 
 }  // namespace internal
 }  // namespace v8

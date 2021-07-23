@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/api/api-inl.h"
 #include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/code-factory.h"
@@ -31,7 +32,12 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
 
   if (!Builtins::AllowDynamicFunction(isolate, target, target_global_proxy)) {
     isolate->CountUsage(v8::Isolate::kFunctionConstructorReturnedUndefined);
-    return isolate->factory()->undefined_value();
+    // TODO(verwaest): We would like to throw using the calling context instead
+    // of the entered context but we don't currently have access to that.
+    HandleScopeImplementer* impl = isolate->handle_scope_implementer();
+    SaveAndSwitchContext save(
+        isolate, impl->LastEnteredOrMicrotaskContext()->native_context());
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kNoAccess), Object);
   }
 
   // Build the source string.
@@ -42,7 +48,6 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
     builder.AppendCharacter('(');
     builder.AppendCString(token);
     builder.AppendCString(" anonymous(");
-    bool parenthesis_in_arg_string = false;
     if (argc > 1) {
       for (int i = 1; i < argc; ++i) {
         if (i > 1) builder.AppendCharacter(',');
@@ -64,13 +69,13 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
     }
     builder.AppendCString("\n})");
     ASSIGN_RETURN_ON_EXCEPTION(isolate, source, builder.Finish(), Object);
+  }
 
-    // The SyntaxError must be thrown after all the (observable) ToString
-    // conversions are done.
-    if (parenthesis_in_arg_string) {
-      THROW_NEW_ERROR(isolate,
-                      NewSyntaxError(MessageTemplate::kParenthesisInArgString),
-                      Object);
+  bool is_code_like = true;
+  for (int i = 0; i < argc; ++i) {
+    if (!args.at(i + 1)->IsCodeLike(isolate)) {
+      is_code_like = false;
+      break;
     }
   }
 
@@ -82,7 +87,7 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
         isolate, function,
         Compiler::GetFunctionFromString(
             handle(target->native_context(), isolate), source,
-            ONLY_SINGLE_FUNCTION_LITERAL, parameters_end_pos),
+            ONLY_SINGLE_FUNCTION_LITERAL, parameters_end_pos, is_code_like),
         Object);
     Handle<Object> result;
     ASSIGN_RETURN_ON_EXCEPTION(
@@ -113,8 +118,10 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
     Handle<Map> map = Map::AsLanguageMode(isolate, initial_map, shared_info);
 
     Handle<Context> context(function->context(), isolate);
-    function = isolate->factory()->NewFunctionFromSharedFunctionInfo(
-        map, shared_info, context, AllocationType::kYoung);
+    function = Factory::JSFunctionBuilder{isolate, shared_info, context}
+                   .set_map(map)
+                   .set_allocation_type(AllocationType::kYoung)
+                   .Build();
   }
   return function;
 }

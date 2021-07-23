@@ -3,28 +3,30 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
-#include "node.h"
 #include "aliased_buffer.h"
+#include "node_messaging.h"
+#include "node_snapshotable.h"
 #include "stream_base.h"
-#include <iostream>
 
 namespace node {
 namespace fs {
 
 class FileHandleReadWrap;
 
-class BindingData : public BaseObject {
+class BindingData : public SnapshotableObject {
  public:
-  explicit BindingData(Environment* env, v8::Local<v8::Object> wrap)
-    : BaseObject(env, wrap),
-      stats_field_array(env->isolate(), kFsStatsBufferLength),
-      stats_field_bigint_array(env->isolate(), kFsStatsBufferLength) {}
+  explicit BindingData(Environment* env, v8::Local<v8::Object> wrap);
 
   AliasedFloat64Array stats_field_array;
   AliasedBigUint64Array stats_field_bigint_array;
 
   std::vector<BaseObjectPtr<FileHandleReadWrap>>
       file_handle_read_wrap_freelist;
+
+  SERIALIZABLE_OBJECT_METHODS()
+  static constexpr FastStringKey type_name{"node::fs::BindingData"};
+  static constexpr EmbedderObjectType type_int =
+      EmbedderObjectType::k_fs_binding_data;
 
   void MemoryInfo(MemoryTracker* tracker) const override;
   SET_SELF_SIZE(BindingData)
@@ -86,6 +88,9 @@ class FSReqBase : public ReqWrap<uv_fs_t> {
   const char* data() const { return has_data_ ? *buffer_ : nullptr; }
   enum encoding encoding() const { return encoding_; }
   bool use_bigint() const { return use_bigint_; }
+  bool is_plain_open() const { return is_plain_open_; }
+
+  void set_is_plain_open(bool value) { is_plain_open_ = value; }
 
   FSContinuationData* continuation_data() const {
     return continuation_data_.get();
@@ -103,13 +108,14 @@ class FSReqBase : public ReqWrap<uv_fs_t> {
 
   void MemoryInfo(MemoryTracker* tracker) const override;
 
-  BindingData* binding_data() { return binding_data_.get(); }
+  BindingData* binding_data();
 
  private:
   std::unique_ptr<FSContinuationData> continuation_data_;
   enum encoding encoding_ = UTF8;
   bool has_data_ = false;
   bool use_bigint_ = false;
+  bool is_plain_open_ = false;
   const char* syscall_ = nullptr;
 
   BaseObjectPtr<BindingData> binding_data_;
@@ -182,6 +188,7 @@ class FSReqAfterScope final {
  public:
   FSReqAfterScope(FSReqBase* wrap, uv_fs_t* req);
   ~FSReqAfterScope();
+  void Clear();
 
   bool Proceed();
 
@@ -193,7 +200,7 @@ class FSReqAfterScope final {
   FSReqAfterScope& operator=(const FSReqAfterScope&&) = delete;
 
  private:
-  FSReqBase* wrap_ = nullptr;
+  BaseObjectPtr<FSReqBase> wrap_;
   uv_fs_t* req_ = nullptr;
   v8::HandleScope handle_scope_;
   v8::Context::Scope context_scope_;
@@ -227,6 +234,12 @@ class FileHandleReadWrap final : public ReqWrap<uv_fs_t> {
 // the object is garbage collected
 class FileHandle final : public AsyncWrap, public StreamBase {
  public:
+  enum InternalFields {
+    kFileHandleBaseField = StreamBase::kInternalFieldCount,
+    kClosingPromiseSlot,
+    kInternalFieldCount
+  };
+
   static FileHandle* New(BindingData* binding_data,
                          int fd,
                          v8::Local<v8::Object> obj = v8::Local<v8::Object>());
@@ -270,7 +283,28 @@ class FileHandle final : public AsyncWrap, public StreamBase {
   FileHandle(const FileHandle&&) = delete;
   FileHandle& operator=(const FileHandle&&) = delete;
 
+  TransferMode GetTransferMode() const override;
+  std::unique_ptr<worker::TransferData> TransferForMessaging() override;
+
  private:
+  class TransferData : public worker::TransferData {
+   public:
+    explicit TransferData(int fd);
+    ~TransferData();
+
+    BaseObjectPtr<BaseObject> Deserialize(
+        Environment* env,
+        v8::Local<v8::Context> context,
+        std::unique_ptr<worker::TransferData> self) override;
+
+    SET_NO_MEMORY_INFO()
+    SET_MEMORY_INFO_NAME(FileHandleTransferData)
+    SET_SELF_SIZE(TransferData)
+
+   private:
+    int fd_;
+  };
+
   FileHandle(BindingData* binding_data, v8::Local<v8::Object> obj, int fd);
 
   // Synchronous close that emits a warning
@@ -316,10 +350,10 @@ class FileHandle final : public AsyncWrap, public StreamBase {
   int fd_;
   bool closing_ = false;
   bool closed_ = false;
+  bool reading_ = false;
   int64_t read_offset_ = -1;
   int64_t read_length_ = -1;
 
-  bool reading_ = false;
   BaseObjectPtr<FileHandleReadWrap> current_read_;
 
   BaseObjectPtr<BindingData> binding_data_;

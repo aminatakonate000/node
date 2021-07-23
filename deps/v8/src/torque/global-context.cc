@@ -14,6 +14,7 @@ DEFINE_CONTEXTUAL_VARIABLE(TargetArchitecture)
 GlobalContext::GlobalContext(Ast ast)
     : collect_language_server_data_(false),
       force_assert_statements_(false),
+      annotate_ir_(false),
       ast_(std::move(ast)) {
   CurrentScope::Scope current_scope(nullptr);
   CurrentSourcePosition::Scope current_source_position(
@@ -24,7 +25,12 @@ GlobalContext::GlobalContext(Ast ast)
 
 TargetArchitecture::TargetArchitecture(bool force_32bit)
     : tagged_size_(force_32bit ? sizeof(int32_t) : kTaggedSize),
-      raw_ptr_size_(force_32bit ? sizeof(int32_t) : kSystemPointerSize) {}
+      raw_ptr_size_(force_32bit ? sizeof(int32_t) : kSystemPointerSize),
+      smi_tag_and_shift_size_(
+          kSmiTagSize + (force_32bit ? SmiTagging<kApiInt32Size>::kSmiShiftSize
+                                     : kSmiShiftSize)),
+      external_ptr_size_(force_32bit ? sizeof(int32_t) : kExternalPointerSize) {
+}
 
 }  // namespace torque
 }  // namespace internal

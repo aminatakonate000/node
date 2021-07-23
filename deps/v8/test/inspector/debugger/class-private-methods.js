@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --harmony-private-methods
-
 let { session, contextGroup, Protocol } = InspectorTest.start(
   "Test private class methods"
 );
@@ -12,6 +10,10 @@ contextGroup.addScript(`
 function run() {
   class A {
     #field = 2;
+
+    static #staticMethod() {}  // should not show up
+    static get #staticAccessor() { }  // should not show up
+    static set #staticAccessor(val) { }  // should not show up
 
     #inc() { this.#field++; return this.#field; }
 

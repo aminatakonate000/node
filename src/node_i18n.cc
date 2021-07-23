@@ -41,6 +41,7 @@
 
 
 #include "node_i18n.h"
+#include "node_external_reference.h"
 
 #if defined(NODE_HAVE_I18N_SUPPORT)
 
@@ -147,8 +148,13 @@ MaybeLocal<Object> Transcode(Environment* env,
   *status = U_ZERO_ERROR;
   MaybeLocal<Object> ret;
   MaybeStackBuffer<char> result;
-  Converter to(toEncoding, "?");
+  Converter to(toEncoding);
   Converter from(fromEncoding);
+
+  size_t sublen = ucnv_getMinCharSize(to.conv());
+  std::string sub(sublen, '?');
+  to.set_subst_chars(sub.c_str());
+
   const uint32_t limit = source_length * to.max_char_size();
   result.AllocateSufficientStorage(limit);
   char* target = *result;
@@ -189,7 +195,12 @@ MaybeLocal<Object> TranscodeFromUcs2(Environment* env,
   *status = U_ZERO_ERROR;
   MaybeStackBuffer<UChar> sourcebuf;
   MaybeLocal<Object> ret;
-  Converter to(toEncoding, "?");
+  Converter to(toEncoding);
+
+  size_t sublen = ucnv_getMinCharSize(to.conv());
+  std::string sub(sublen, '?');
+  to.set_subst_chars(sub.c_str());
+
   const size_t length_in_chars = source_length / sizeof(UChar);
   CopySourceBuffer(&sourcebuf, source, source_length, length_in_chars);
   MaybeStackBuffer<char> destbuf(length_in_chars);
@@ -338,8 +349,7 @@ void ICUErrorName(const FunctionCallbackInfo<Value>& args) {
   UErrorCode status = static_cast<UErrorCode>(args[0].As<Int32>()->Value());
   args.GetReturnValue().Set(
       String::NewFromUtf8(env->isolate(),
-                          u_errorName(status),
-                          NewStringType::kNormal).ToLocalChecked());
+                          u_errorName(status)).ToLocalChecked());
 }
 
 }  // anonymous namespace
@@ -475,7 +485,7 @@ void ConverterObject::Decode(const FunctionCallbackInfo<Value>& args) {
     }
     ret = ToBufferEndian(env, &result);
     if (omit_initial_bom && !ret.IsEmpty()) {
-      // Peform `ret = ret.slice(2)`.
+      // Perform `ret = ret.slice(2)`.
       CHECK(ret.ToLocalChecked()->IsUint8Array());
       Local<Uint8Array> orig_ret = ret.ToLocalChecked().As<Uint8Array>();
       ret = Buffer::New(env,
@@ -530,6 +540,16 @@ bool InitializeICUDirectory(const std::string& path) {
     u_init(&status);
   }
   return status == U_ZERO_ERROR;
+}
+
+void SetDefaultTimeZone(const char* tzid) {
+  size_t tzidlen = strlen(tzid) + 1;
+  UErrorCode status = U_ZERO_ERROR;
+  MaybeStackBuffer<UChar, 256> id(tzidlen);
+  u_charsToUChars(tzid, id.out(), tzidlen);
+  // This is threadsafe:
+  ucal_setDefaultTimeZone(id.out(), &status);
+  CHECK(U_SUCCESS(status));
 }
 
 int32_t ToUnicode(MaybeStackBuffer<char>* buf,
@@ -811,6 +831,7 @@ void Initialize(Local<Object> target,
   // ConverterObject
   {
     Local<FunctionTemplate> t = FunctionTemplate::New(env->isolate());
+    t->Inherit(BaseObject::GetConstructorTemplate(env));
     t->InstanceTemplate()->SetInternalFieldCount(
         ConverterObject::kInternalFieldCount);
     Local<String> converter_string =
@@ -824,9 +845,21 @@ void Initialize(Local<Object> target,
   env->SetMethod(target, "hasConverter", ConverterObject::Has);
 }
 
+void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+  registry->Register(ToUnicode);
+  registry->Register(ToASCII);
+  registry->Register(GetStringWidth);
+  registry->Register(ICUErrorName);
+  registry->Register(Transcode);
+  registry->Register(ConverterObject::Create);
+  registry->Register(ConverterObject::Decode);
+  registry->Register(ConverterObject::Has);
+}
+
 }  // namespace i18n
 }  // namespace node
 
 NODE_MODULE_CONTEXT_AWARE_INTERNAL(icu, node::i18n::Initialize)
+NODE_MODULE_EXTERNAL_REFERENCE(icu, node::i18n::RegisterExternalReferences)
 
 #endif  // NODE_HAVE_I18N_SUPPORT

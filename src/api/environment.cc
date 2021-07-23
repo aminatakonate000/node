@@ -16,54 +16,48 @@ using errors::TryCatchScope;
 using v8::Array;
 using v8::Context;
 using v8::EscapableHandleScope;
-using v8::FinalizationGroup;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::HandleScope;
 using v8::Isolate;
 using v8::Local;
 using v8::MaybeLocal;
-using v8::MicrotasksPolicy;
 using v8::Null;
 using v8::Object;
 using v8::ObjectTemplate;
 using v8::Private;
 using v8::PropertyDescriptor;
+using v8::SealHandleScope;
 using v8::String;
 using v8::Value;
 
-static bool AllowWasmCodeGenerationCallback(Local<Context> context,
-                                            Local<String>) {
+bool AllowWasmCodeGenerationCallback(Local<Context> context,
+                                     Local<String>) {
   Local<Value> wasm_code_gen =
       context->GetEmbedderData(ContextEmbedderIndex::kAllowWasmCodeGeneration);
   return wasm_code_gen->IsUndefined() || wasm_code_gen->IsTrue();
 }
 
-static bool ShouldAbortOnUncaughtException(Isolate* isolate) {
+bool ShouldAbortOnUncaughtException(Isolate* isolate) {
   DebugSealHandleScope scope(isolate);
   Environment* env = Environment::GetCurrent(isolate);
   return env != nullptr &&
          (env->is_main_thread() || !env->is_stopping()) &&
+         env->abort_on_uncaught_exception() &&
          env->should_abort_on_uncaught_toggle()[0] &&
          !env->inside_should_not_abort_on_uncaught_scope();
 }
 
-static MaybeLocal<Value> PrepareStackTraceCallback(Local<Context> context,
-                                      Local<Value> exception,
-                                      Local<Array> trace) {
+MaybeLocal<Value> PrepareStackTraceCallback(Local<Context> context,
+                                            Local<Value> exception,
+                                            Local<Array> trace) {
   Environment* env = Environment::GetCurrent(context);
   if (env == nullptr) {
-    MaybeLocal<String> s = exception->ToString(context);
-    return s.IsEmpty() ?
-      MaybeLocal<Value>() :
-      MaybeLocal<Value>(s.ToLocalChecked());
+    return exception->ToString(context).FromMaybe(Local<Value>());
   }
   Local<Function> prepare = env->prepare_stack_trace_callback();
   if (prepare.IsEmpty()) {
-    MaybeLocal<String> s = exception->ToString(context);
-    return s.IsEmpty() ?
-      MaybeLocal<Value>() :
-      MaybeLocal<Value>(s.ToLocalChecked());
+    return exception->ToString(context).FromMaybe(Local<Value>());
   }
   Local<Value> args[] = {
       context->Global(),
@@ -81,15 +75,6 @@ static MaybeLocal<Value> PrepareStackTraceCallback(Local<Context> context,
     try_catch.ReThrow();
   }
   return result;
-}
-
-static void HostCleanupFinalizationGroupCallback(
-    Local<Context> context, Local<FinalizationGroup> group) {
-  Environment* env = Environment::GetCurrent(context);
-  if (env == nullptr) {
-    return;
-  }
-  env->RegisterFinalizationGroupForCleanup(group);
 }
 
 void* NodeArrayBufferAllocator::Allocate(size_t size) {
@@ -226,6 +211,8 @@ void SetIsolateCreateParamsForNode(Isolate::CreateParams* params) {
     // heap based on the actual physical memory.
     params->constraints.ConfigureDefaults(total_memory, 0);
   }
+  params->embedder_wrapper_object_index = BaseObject::InternalFields::kSlot;
+  params->embedder_wrapper_type_index = std::numeric_limits<int>::max();
 }
 
 void SetIsolateErrorHandlers(v8::Isolate* isolate, const IsolateSettings& s) {
@@ -244,9 +231,11 @@ void SetIsolateErrorHandlers(v8::Isolate* isolate, const IsolateSettings& s) {
       s.fatal_error_callback : OnFatalError;
   isolate->SetFatalErrorHandler(fatal_error_cb);
 
-  auto* prepare_stack_trace_cb = s.prepare_stack_trace_callback ?
-      s.prepare_stack_trace_callback : PrepareStackTraceCallback;
-  isolate->SetPrepareStackTraceCallback(prepare_stack_trace_cb);
+  if ((s.flags & SHOULD_NOT_SET_PREPARE_STACK_TRACE_CALLBACK) == 0) {
+    auto* prepare_stack_trace_cb = s.prepare_stack_trace_callback ?
+        s.prepare_stack_trace_callback : PrepareStackTraceCallback;
+    isolate->SetPrepareStackTraceCallback(prepare_stack_trace_cb);
+  }
 }
 
 void SetIsolateMiscHandlers(v8::Isolate* isolate, const IsolateSettings& s) {
@@ -256,14 +245,11 @@ void SetIsolateMiscHandlers(v8::Isolate* isolate, const IsolateSettings& s) {
     s.allow_wasm_code_generation_callback : AllowWasmCodeGenerationCallback;
   isolate->SetAllowWasmCodeGenerationCallback(allow_wasm_codegen_cb);
 
-  auto* promise_reject_cb = s.promise_reject_callback ?
-    s.promise_reject_callback : task_queue::PromiseRejectCallback;
-  isolate->SetPromiseRejectCallback(promise_reject_cb);
-
-  auto* host_cleanup_cb = s.host_cleanup_finalization_group_callback ?
-    s.host_cleanup_finalization_group_callback :
-    HostCleanupFinalizationGroupCallback;
-  isolate->SetHostCleanupFinalizationGroupCallback(host_cleanup_cb);
+  if ((s.flags & SHOULD_NOT_SET_PROMISE_REJECTION_CALLBACK) == 0) {
+    auto* promise_reject_cb = s.promise_reject_callback ?
+      s.promise_reject_callback : PromiseRejectCallback;
+    isolate->SetPromiseRejectCallback(promise_reject_cb);
+  }
 
   if (s.flags & DETAILED_SOURCE_POSITIONS_FOR_PROFILING)
     v8::CpuProfiler::UseDetailedSourcePositionsForProfiling(isolate);
@@ -278,10 +264,6 @@ void SetIsolateUpForNode(v8::Isolate* isolate,
 void SetIsolateUpForNode(v8::Isolate* isolate) {
   IsolateSettings settings;
   SetIsolateUpForNode(isolate, settings);
-}
-
-Isolate* NewIsolate(ArrayBufferAllocator* allocator, uv_loop_t* event_loop) {
-  return NewIsolate(allocator, event_loop, GetMainThreadMultiIsolatePlatform());
 }
 
 // TODO(joyeecheung): we may want to expose this, but then we need to be
@@ -343,18 +325,6 @@ struct InspectorParentHandleImpl : public InspectorParentHandle {
 };
 #endif
 
-Environment* CreateEnvironment(IsolateData* isolate_data,
-                               Local<Context> context,
-                               int argc,
-                               const char* const* argv,
-                               int exec_argc,
-                               const char* const* exec_argv) {
-  return CreateEnvironment(
-      isolate_data, context,
-      std::vector<std::string>(argv, argv + argc),
-      std::vector<std::string>(exec_argv, exec_argv + exec_argc));
-}
-
 Environment* CreateEnvironment(
     IsolateData* isolate_data,
     Local<Context> context,
@@ -369,16 +339,7 @@ Environment* CreateEnvironment(
   // TODO(addaleax): This is a much better place for parsing per-Environment
   // options than the global parse call.
   Environment* env = new Environment(
-      isolate_data,
-      context,
-      args,
-      exec_args,
-      flags,
-      thread_id);
-  if (flags & EnvironmentFlags::kOwnsProcessState) {
-    env->set_abort_on_uncaught_exception(false);
-  }
-
+      isolate_data, context, args, exec_args, nullptr, flags, thread_id);
 #if HAVE_INSPECTOR
   if (inspector_parent_handle) {
     env->InitializeInspector(
@@ -398,10 +359,14 @@ Environment* CreateEnvironment(
 }
 
 void FreeEnvironment(Environment* env) {
+  Isolate* isolate = env->isolate();
+  Isolate::DisallowJavascriptExecutionScope disallow_js(isolate,
+      Isolate::DisallowJavascriptExecutionScope::THROW_ON_FAILURE);
   {
-    // TODO(addaleax): This should maybe rather be in a SealHandleScope.
-    HandleScope handle_scope(env->isolate());
+    HandleScope handle_scope(isolate);  // For env->context().
     Context::Scope context_scope(env->context());
+    SealHandleScope seal_handle_scope(isolate);
+
     env->set_stopping(true);
     env->stop_sub_worker_contexts();
     env->RunCleanup();
@@ -413,7 +378,7 @@ void FreeEnvironment(Environment* env) {
   // NodePlatform implementation.
   MultiIsolatePlatform* platform = env->isolate_data()->platform();
   if (platform != nullptr)
-    platform->DrainTasks(env->isolate());
+    platform->DrainTasks(isolate);
 
   delete env;
 }
@@ -432,17 +397,10 @@ NODE_EXTERN std::unique_ptr<InspectorParentHandle> GetInspectorParentHandle(
 #endif
 }
 
-void LoadEnvironment(Environment* env) {
-  USE(LoadEnvironment(env,
-                      StartExecutionCallback{},
-                      {}));
-}
-
 MaybeLocal<Value> LoadEnvironment(
     Environment* env,
-    StartExecutionCallback cb,
-    std::unique_ptr<InspectorParentHandle> removeme) {
-  env->InitializeLibuv(per_process::v8_is_profiling);
+    StartExecutionCallback cb) {
+  env->InitializeLibuv();
   env->InitializeDiagnostics();
 
   return StartExecution(env, cb);
@@ -450,18 +408,17 @@ MaybeLocal<Value> LoadEnvironment(
 
 MaybeLocal<Value> LoadEnvironment(
     Environment* env,
-    const char* main_script_source_utf8,
-    std::unique_ptr<InspectorParentHandle> removeme) {
+    const char* main_script_source_utf8) {
   CHECK_NOT_NULL(main_script_source_utf8);
+  Isolate* isolate = env->isolate();
   return LoadEnvironment(
       env,
       [&](const StartExecutionCallbackInfo& info) -> MaybeLocal<Value> {
         // This is a slightly hacky way to convert UTF-8 to UTF-16.
         Local<String> str =
-            String::NewFromUtf8(env->isolate(),
-                                main_script_source_utf8,
-                                v8::NewStringType::kNormal).ToLocalChecked();
-        auto main_utf16 = std::make_unique<String::Value>(env->isolate(), str);
+            String::NewFromUtf8(isolate,
+                                main_script_source_utf8).ToLocalChecked();
+        auto main_utf16 = std::make_unique<String::Value>(isolate, str);
 
         // TODO(addaleax): Avoid having a global table for all scripts.
         std::string name = "embedder_main_" + std::to_string(env->thread_id());
@@ -483,8 +440,12 @@ Environment* GetCurrentEnvironment(Local<Context> context) {
   return Environment::GetCurrent(context);
 }
 
-MultiIsolatePlatform* GetMainThreadMultiIsolatePlatform() {
-  return per_process::v8_platform.Platform();
+IsolateData* GetEnvironmentIsolateData(Environment* env) {
+  return env->isolate_data();
+}
+
+ArrayBufferAllocator* GetArrayBufferAllocator(IsolateData* isolate_data) {
+  return isolate_data->node_allocator();
 }
 
 MultiIsolatePlatform* GetMultiIsolatePlatform(Environment* env) {
@@ -506,7 +467,8 @@ MultiIsolatePlatform* CreatePlatform(
 MultiIsolatePlatform* CreatePlatform(
     int thread_pool_size,
     v8::TracingController* tracing_controller) {
-  return MultiIsolatePlatform::Create(thread_pool_size, tracing_controller)
+  return MultiIsolatePlatform::Create(thread_pool_size,
+                                      tracing_controller)
       .release();
 }
 
@@ -516,8 +478,11 @@ void FreePlatform(MultiIsolatePlatform* platform) {
 
 std::unique_ptr<MultiIsolatePlatform> MultiIsolatePlatform::Create(
     int thread_pool_size,
-    v8::TracingController* tracing_controller) {
-  return std::make_unique<NodePlatform>(thread_pool_size, tracing_controller);
+    v8::TracingController* tracing_controller,
+    v8::PageAllocator* page_allocator) {
+  return std::make_unique<NodePlatform>(thread_pool_size,
+                                        tracing_controller,
+                                        page_allocator);
 }
 
 MaybeLocal<Object> GetPerContextExports(Local<Context> context) {
@@ -575,7 +540,7 @@ void InitializeContextRuntime(Local<Context> context) {
   if (context->Global()->Get(context, intl_string).ToLocal(&intl_v) &&
       intl_v->IsObject()) {
     Local<Object> intl = intl_v.As<Object>();
-    intl->Delete(context, break_iter_string).FromJust();
+    intl->Delete(context, break_iter_string).Check();
   }
 
   // Delete `Atomics.wake`
@@ -586,7 +551,7 @@ void InitializeContextRuntime(Local<Context> context) {
   if (context->Global()->Get(context, atomics_string).ToLocal(&atomics_v) &&
       atomics_v->IsObject()) {
     Local<Object> atomics = atomics_v.As<Object>();
-    atomics->Delete(context, wake_string).FromJust();
+    atomics->Delete(context, wake_string).Check();
   }
 
   // Remove __proto__
@@ -656,10 +621,10 @@ bool InitializePrimordials(Local<Context> context) {
     MaybeLocal<Function> maybe_fn =
         native_module::NativeModuleEnv::LookupAndCompile(
             context, *module, &parameters, nullptr);
-    if (maybe_fn.IsEmpty()) {
+    Local<Function> fn;
+    if (!maybe_fn.ToLocal(&fn)) {
       return false;
     }
-    Local<Function> fn = maybe_fn.ToLocalChecked();
     MaybeLocal<Value> result =
         fn->Call(context, Undefined(isolate), arraysize(arguments), arguments);
     // Execution failed during context creation.
@@ -694,10 +659,14 @@ void AddLinkedBinding(Environment* env, const node_module& mod) {
   CHECK_NOT_NULL(env);
   Mutex::ScopedLock lock(env->extra_linked_bindings_mutex());
 
-  node_module* prev_head = env->extra_linked_bindings_head();
+  node_module* prev_tail = env->extra_linked_bindings_tail();
   env->extra_linked_bindings()->push_back(mod);
-  if (prev_head != nullptr)
-    prev_head->nm_link = &env->extra_linked_bindings()->back();
+  if (prev_tail != nullptr)
+    prev_tail->nm_link = &env->extra_linked_bindings()->back();
+}
+
+void AddLinkedBinding(Environment* env, const napi_module& mod) {
+  AddLinkedBinding(env, napi_module_to_node_module(&mod));
 }
 
 void AddLinkedBinding(Environment* env,
@@ -728,6 +697,7 @@ void DefaultProcessExitHandler(Environment* env, int exit_code) {
   env->set_can_call_into_js(false);
   env->stop_sub_worker_contexts();
   DisposePlatform();
+  uv_library_shutdown();
   exit(exit_code);
 }
 

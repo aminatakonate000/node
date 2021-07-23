@@ -13,11 +13,8 @@ namespace internal {
 RegExpMacroAssemblerTracer::RegExpMacroAssemblerTracer(
     Isolate* isolate, RegExpMacroAssembler* assembler)
     : RegExpMacroAssembler(isolate, assembler->zone()), assembler_(assembler) {
-  IrregexpImplementation type = assembler->Implementation();
-  DCHECK_LT(type, 9);
-  const char* impl_names[] = {"IA32", "ARM", "ARM64", "MIPS",    "S390",
-                              "PPC",  "X64", "X87",   "Bytecode"};
-  PrintF("RegExpMacroAssembler%s();\n", impl_names[type]);
+  PrintF("RegExpMacroAssembler%s();\n",
+         ImplementationToString(assembler->Implementation()));
 }
 
 RegExpMacroAssemblerTracer::~RegExpMacroAssemblerTracer() = default;
@@ -351,7 +348,6 @@ void RegExpMacroAssemblerTracer::CheckNotBackReference(int start_reg,
   assembler_->CheckNotBackReference(start_reg, read_backward, on_no_match);
 }
 
-
 void RegExpMacroAssemblerTracer::CheckNotBackReferenceIgnoreCase(
     int start_reg, bool read_backward, bool unicode, Label* on_no_match) {
   PrintF(" CheckNotBackReferenceIgnoreCase(register=%d, %s %s, label[%08x]);\n",
@@ -360,7 +356,6 @@ void RegExpMacroAssemblerTracer::CheckNotBackReferenceIgnoreCase(
   assembler_->CheckNotBackReferenceIgnoreCase(start_reg, read_backward, unicode,
                                               on_no_match);
 }
-
 
 void RegExpMacroAssemblerTracer::CheckPosition(int cp_offset,
                                                Label* on_outside_input) {

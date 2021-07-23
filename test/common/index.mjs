@@ -1,5 +1,3 @@
-/* eslint-disable node-core/require-common-first, node-core/required-modules */
-
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -12,13 +10,12 @@ const {
   isIBMi,
   isLinuxPPCBE,
   isSunOS,
+  isDumbTerminal,
   isFreeBSD,
   isOpenBSD,
   isLinux,
   isOSX,
   enoughTestMem,
-  enoughTestCpu,
-  rootDir,
   buildType,
   localIPv6Hosts,
   opensslCli,
@@ -30,7 +27,9 @@ const {
   allowGlobals,
   mustCall,
   mustCallAtLeast,
+  mustSucceed,
   hasMultiLocalhost,
+  skipIfDumbTerminal,
   skipIfEslintMissing,
   canCreateSymLink,
   getCallSite,
@@ -45,7 +44,6 @@ const {
   skipIf32Bits,
   getArrayBufferViews,
   getBufferSources,
-  disableCrashOnUnhandledRejection,
   getTTYfd,
   runWithInvalidFD
 } = common;
@@ -57,13 +55,12 @@ export {
   isIBMi,
   isLinuxPPCBE,
   isSunOS,
+  isDumbTerminal,
   isFreeBSD,
   isOpenBSD,
   isLinux,
   isOSX,
   enoughTestMem,
-  enoughTestCpu,
-  rootDir,
   buildType,
   localIPv6Hosts,
   opensslCli,
@@ -75,7 +72,9 @@ export {
   allowGlobals,
   mustCall,
   mustCallAtLeast,
+  mustSucceed,
   hasMultiLocalhost,
+  skipIfDumbTerminal,
   skipIfEslintMissing,
   canCreateSymLink,
   getCallSite,
@@ -90,7 +89,6 @@ export {
   skipIf32Bits,
   getArrayBufferViews,
   getBufferSources,
-  disableCrashOnUnhandledRejection,
   getTTYfd,
   runWithInvalidFD,
   createRequire

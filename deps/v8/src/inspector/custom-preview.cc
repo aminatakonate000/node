@@ -116,13 +116,13 @@ bool substituteObjectTags(int sessionId, const String16& groupName,
     protocol::Response response =
         injectedScript->wrapObject(originValue, groupName, WrapMode::kNoPreview,
                                    configValue, maxDepth - 1, &wrapper);
-    if (!response.isSuccess() || !wrapper) {
+    if (!response.IsSuccess() || !wrapper) {
       reportError(context, tryCatch, "cannot wrap value");
       return false;
     }
-    std::vector<uint8_t> cbor = std::move(*wrapper).TakeSerialized();
     std::vector<uint8_t> json;
-    v8_crdtp::json::ConvertCBORToJSON(v8_crdtp::SpanFrom(cbor), &json);
+    v8_crdtp::json::ConvertCBORToJSON(v8_crdtp::SpanFrom(wrapper->Serialize()),
+                                      &json);
     v8::Local<v8::Value> jsonWrapper;
     v8_inspector::StringView serialized(json.data(), json.size());
     if (!v8::JSON::Parse(context, toV8String(isolate, serialized))
@@ -249,7 +249,11 @@ void generateCustomPreview(int sessionId, const String16& groupName,
                            v8::Local<v8::Object> object,
                            v8::MaybeLocal<v8::Value> maybeConfig, int maxDepth,
                            std::unique_ptr<CustomPreview>* preview) {
-  v8::Local<v8::Context> context = object->CreationContext();
+  v8::Local<v8::Context> context;
+  if (!object->GetCreationContext().ToLocal(&context)) {
+    return;
+  }
+
   v8::Isolate* isolate = context->GetIsolate();
   v8::MicrotasksScope microtasksScope(isolate,
                                       v8::MicrotasksScope::kDoNotRunMicrotasks);

@@ -1,12 +1,14 @@
 #include "stream_base.h"  // NOLINT(build/include_inline)
 #include "stream_base-inl.h"
 #include "stream_wrap.h"
+#include "allocated_buffer-inl.h"
 
+#include "env-inl.h"
+#include "js_stream.h"
 #include "node.h"
 #include "node_buffer.h"
 #include "node_errors.h"
-#include "env-inl.h"
-#include "js_stream.h"
+#include "node_external_reference.h"
 #include "string_bytes.h"
 #include "util-inl.h"
 #include "v8.h"
@@ -132,7 +134,7 @@ int StreamBase::Writev(const FunctionCallbackInfo<Value>& args) {
 
   AllocatedBuffer storage;
   if (storage_size > 0)
-    storage = env->AllocateManaged(storage_size);
+    storage = AllocatedBuffer::AllocateManaged(env, storage_size);
 
   offset = 0;
   if (!all_buffers) {
@@ -264,7 +266,7 @@ int StreamBase::WriteString(const FunctionCallbackInfo<Value>& args) {
 
     // Immediate failure or success
     if (err != 0 || count == 0) {
-      SetWriteResult(StreamWriteResult { false, err, nullptr, data_size });
+      SetWriteResult(StreamWriteResult { false, err, nullptr, data_size, {} });
       return err;
     }
 
@@ -276,12 +278,12 @@ int StreamBase::WriteString(const FunctionCallbackInfo<Value>& args) {
 
   if (try_write) {
     // Copy partial data
-    data = env->AllocateManaged(buf.len);
+    data = AllocatedBuffer::AllocateManaged(env, buf.len);
     memcpy(data.data(), buf.base, buf.len);
     data_size = buf.len;
   } else {
     // Write it
-    data = env->AllocateManaged(storage_size);
+    data = AllocatedBuffer::AllocateManaged(env, storage_size);
     data_size = StringBytes::Write(env->isolate(),
                                    data.data(),
                                    storage_size,
@@ -336,7 +338,7 @@ MaybeLocal<Value> StreamBase::CallJSOnreadMethod(ssize_t nread,
     }
   }
 
-  env->stream_base_state()[kReadBytesOrError] = nread;
+  env->stream_base_state()[kReadBytesOrError] = static_cast<int32_t>(nread);
   env->stream_base_state()[kArrayBufferOffset] = offset;
 
   Local<Value> argv[] = {
@@ -422,6 +424,29 @@ void StreamBase::AddMethods(Environment* env, Local<FunctionTemplate> t) {
           &Value::IsFunction>);
 }
 
+void StreamBase::RegisterExternalReferences(
+    ExternalReferenceRegistry* registry) {
+  registry->Register(GetFD);
+  registry->Register(GetExternal);
+  registry->Register(GetBytesRead);
+  registry->Register(GetBytesWritten);
+  registry->Register(JSMethod<&StreamBase::ReadStartJS>);
+  registry->Register(JSMethod<&StreamBase::ReadStopJS>);
+  registry->Register(JSMethod<&StreamBase::Shutdown>);
+  registry->Register(JSMethod<&StreamBase::UseUserBuffer>);
+  registry->Register(JSMethod<&StreamBase::Writev>);
+  registry->Register(JSMethod<&StreamBase::WriteBuffer>);
+  registry->Register(JSMethod<&StreamBase::WriteString<ASCII>>);
+  registry->Register(JSMethod<&StreamBase::WriteString<UTF8>>);
+  registry->Register(JSMethod<&StreamBase::WriteString<UCS2>>);
+  registry->Register(JSMethod<&StreamBase::WriteString<LATIN1>>);
+  registry->Register(
+      BaseObject::InternalFieldGet<StreamBase::kOnReadFunctionField>);
+  registry->Register(
+      BaseObject::InternalFieldSet<StreamBase::kOnReadFunctionField,
+                                   &Value::IsFunction>);
+}
+
 void StreamBase::GetFD(const FunctionCallbackInfo<Value>& args) {
   // Mimic implementation of StreamBase::GetFD() and UDPWrap::GetFD().
   StreamBase* wrap = StreamBase::FromObject(args.This().As<Object>());
@@ -486,7 +511,7 @@ void StreamResource::ClearError() {
 uv_buf_t EmitToJSStreamListener::OnStreamAlloc(size_t suggested_size) {
   CHECK_NOT_NULL(stream_);
   Environment* env = static_cast<StreamBase*>(stream_)->stream_env();
-  return env->AllocateManaged(suggested_size).release();
+  return AllocatedBuffer::AllocateManaged(env, suggested_size).release();
 }
 
 void EmitToJSStreamListener::OnStreamRead(ssize_t nread, const uv_buf_t& buf_) {
@@ -620,12 +645,16 @@ StreamResource::~StreamResource() {
 
 ShutdownWrap* StreamBase::CreateShutdownWrap(
     Local<Object> object) {
-  return new SimpleShutdownWrap<AsyncWrap>(this, object);
+  auto* wrap = new SimpleShutdownWrap<AsyncWrap>(this, object);
+  wrap->MakeWeak();
+  return wrap;
 }
 
 WriteWrap* StreamBase::CreateWriteWrap(
     Local<Object> object) {
-  return new SimpleWriteWrap<AsyncWrap>(this, object);
+  auto* wrap = new SimpleWriteWrap<AsyncWrap>(this, object);
+  wrap->MakeWeak();
+  return wrap;
 }
 
 }  // namespace node

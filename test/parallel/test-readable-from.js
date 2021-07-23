@@ -3,7 +3,14 @@
 const { mustCall } = require('../common');
 const { once } = require('events');
 const { Readable } = require('stream');
-const { strictEqual } = require('assert');
+const { strictEqual, throws } = require('assert');
+const common = require('../common');
+
+{
+  throws(() => {
+    Readable.from(null);
+  }, /ERR_INVALID_ARG_TYPE/);
+}
 
 async function toReadableBasicSupport() {
   async function* generate() {
@@ -41,7 +48,7 @@ async function toReadablePromises() {
   const promises = [
     Promise.resolve('a'),
     Promise.resolve('b'),
-    Promise.resolve('c')
+    Promise.resolve('c'),
   ];
 
   const stream = Readable.from(promises);
@@ -159,6 +166,48 @@ async function asTransformStream() {
   }
 }
 
+async function endWithError() {
+  async function* generate() {
+    yield 1;
+    yield 2;
+    yield Promise.reject('Boum');
+  }
+
+  const stream = Readable.from(generate());
+
+  const expected = [1, 2];
+
+  try {
+    for await (const chunk of stream) {
+      strictEqual(chunk, expected.shift());
+    }
+    throw new Error();
+  } catch (err) {
+    strictEqual(expected.length, 0);
+    strictEqual(err, 'Boum');
+  }
+}
+
+async function destroyingStreamWithErrorThrowsInGenerator() {
+  const validateError = common.mustCall((e) => {
+    strictEqual(e, 'Boum');
+  });
+  async function* generate() {
+    try {
+      yield 1;
+      yield 2;
+      yield 3;
+      throw new Error();
+    } catch (e) {
+      validateError(e);
+    }
+  }
+  const stream = Readable.from(generate());
+  stream.read();
+  stream.once('error', common.mustCall());
+  stream.destroy('Boum');
+}
+
 Promise.all([
   toReadableBasicSupport(),
   toReadableSyncIterator(),
@@ -168,5 +217,7 @@ Promise.all([
   toReadableOnData(),
   toReadableOnDataNonObject(),
   destroysTheStreamWhenThrowing(),
-  asTransformStream()
+  asTransformStream(),
+  endWithError(),
+  destroyingStreamWithErrorThrowsInGenerator(),
 ]).then(mustCall());

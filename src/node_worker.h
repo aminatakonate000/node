@@ -16,6 +16,7 @@ enum ResourceLimits {
   kMaxYoungGenerationSizeMb,
   kMaxOldGenerationSizeMb,
   kCodeRangeSizeMb,
+  kStackSizeMb,
   kTotalResourceLimitCount
 };
 
@@ -34,8 +35,11 @@ class Worker : public AsyncWrap {
   void Run();
 
   // Forcibly exit the thread with a specified exit code. This may be called
-  // from any thread.
-  void Exit(int code);
+  // from any thread. `error_code` and `error_message` can be used to create
+  // a custom `'error'` event before emitting `'exit'`.
+  void Exit(int code,
+            const char* error_code = nullptr,
+            const char* error_message = nullptr);
 
   // Wait for the worker thread to stop (in a blocking manner).
   void JoinThread();
@@ -46,6 +50,7 @@ class Worker : public AsyncWrap {
   void MemoryInfo(MemoryTracker* tracker) const override;
   SET_MEMORY_INFO_NAME(Worker)
   SET_SELF_SIZE(Worker)
+  bool IsNotIndicativeOfMemoryLeakAtExit() const override;
 
   bool is_stopped() const;
 
@@ -61,6 +66,8 @@ class Worker : public AsyncWrap {
       const v8::FunctionCallbackInfo<v8::Value>& args);
   v8::Local<v8::Float64Array> GetResourceLimits(v8::Isolate* isolate) const;
   static void TakeHeapSnapshot(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void LoopIdleTime(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void LoopStartTime(const v8::FunctionCallbackInfo<v8::Value>& args);
 
  private:
   void CreateEnvMessagePort(Environment* env);
@@ -92,7 +99,7 @@ class Worker : public AsyncWrap {
   void UpdateResourceConstraints(v8::ResourceConstraints* constraints);
 
   // Full size of the thread's stack.
-  static constexpr size_t kStackSize = 4 * 1024 * 1024;
+  size_t stack_size_ = 4 * 1024 * 1024;
   // Stack buffer size that is not available to the JS engine.
   static constexpr size_t kStackBufferSize = 192 * 1024;
 
@@ -110,6 +117,7 @@ class Worker : public AsyncWrap {
   bool stopped_ = true;
 
   bool has_ref_ = true;
+  uint64_t environment_flags_ = EnvironmentFlags::kNoFlags;
 
   // The real Environment of the worker object. It has a lesser
   // lifespan than the worker object itself - comes to life

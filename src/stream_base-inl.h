@@ -3,7 +3,9 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
+#include "allocated_buffer-inl.h"
 #include "async_wrap-inl.h"
+#include "base_object-inl.h"
 #include "node.h"
 #include "stream_base.h"
 #include "v8.h"
@@ -31,9 +33,10 @@ StreamReq* StreamReq::FromObject(v8::Local<v8::Object> req_wrap_obj) {
 }
 
 void StreamReq::Dispose() {
-  std::unique_ptr<StreamReq> ptr(this);
+  BaseObjectPtr<AsyncWrap> destroy_me{GetAsyncWrap()};
   object()->SetAlignedPointerInInternalField(
       StreamReq::kStreamReqField, nullptr);
+  destroy_me->Detach();
 }
 
 v8::Local<v8::Object> StreamReq::object() {
@@ -90,29 +93,29 @@ void StreamResource::RemoveStreamListener(StreamListener* listener) {
 }
 
 uv_buf_t StreamResource::EmitAlloc(size_t suggested_size) {
-  DebugSealHandleScope handle_scope(v8::Isolate::GetCurrent());
+  DebugSealHandleScope seal_handle_scope;
   return listener_->OnStreamAlloc(suggested_size);
 }
 
 void StreamResource::EmitRead(ssize_t nread, const uv_buf_t& buf) {
-  DebugSealHandleScope handle_scope(v8::Isolate::GetCurrent());
+  DebugSealHandleScope seal_handle_scope;
   if (nread > 0)
     bytes_read_ += static_cast<uint64_t>(nread);
   listener_->OnStreamRead(nread, buf);
 }
 
 void StreamResource::EmitAfterWrite(WriteWrap* w, int status) {
-  DebugSealHandleScope handle_scope(v8::Isolate::GetCurrent());
+  DebugSealHandleScope seal_handle_scope;
   listener_->OnStreamAfterWrite(w, status);
 }
 
 void StreamResource::EmitAfterShutdown(ShutdownWrap* w, int status) {
-  DebugSealHandleScope handle_scope(v8::Isolate::GetCurrent());
+  DebugSealHandleScope seal_handle_scope;
   listener_->OnStreamAfterShutdown(w, status);
 }
 
 void StreamResource::EmitWantsWrite(size_t suggested_size) {
-  DebugSealHandleScope handle_scope(v8::Isolate::GetCurrent());
+  DebugSealHandleScope seal_handle_scope;
   listener_->OnStreamWantsWrite(suggested_size);
 }
 
@@ -134,8 +137,11 @@ int StreamBase::Shutdown(v8::Local<v8::Object> req_wrap_obj) {
     StreamReq::ResetObject(req_wrap_obj);
   }
 
+  BaseObjectPtr<AsyncWrap> req_wrap_ptr;
   AsyncHooks::DefaultTriggerAsyncIdScope trigger_scope(GetAsyncWrap());
   ShutdownWrap* req_wrap = CreateShutdownWrap(req_wrap_obj);
+  if (req_wrap != nullptr)
+    req_wrap_ptr.reset(req_wrap->GetAsyncWrap());
   int err = DoShutdown(req_wrap);
 
   if (err != 0 && req_wrap != nullptr) {
@@ -169,7 +175,7 @@ StreamWriteResult StreamBase::Write(
   if (send_handle == nullptr) {
     err = DoTryWrite(&bufs, &count);
     if (err != 0 || count == 0) {
-      return StreamWriteResult { false, err, nullptr, total_bytes };
+      return StreamWriteResult { false, err, nullptr, total_bytes, {} };
     }
   }
 
@@ -179,13 +185,14 @@ StreamWriteResult StreamBase::Write(
     if (!env->write_wrap_template()
              ->NewInstance(env->context())
              .ToLocal(&req_wrap_obj)) {
-      return StreamWriteResult { false, UV_EBUSY, nullptr, 0 };
+      return StreamWriteResult { false, UV_EBUSY, nullptr, 0, {} };
     }
     StreamReq::ResetObject(req_wrap_obj);
   }
 
   AsyncHooks::DefaultTriggerAsyncIdScope trigger_scope(GetAsyncWrap());
   WriteWrap* req_wrap = CreateWriteWrap(req_wrap_obj);
+  BaseObjectPtr<AsyncWrap> req_wrap_ptr(req_wrap->GetAsyncWrap());
 
   err = DoWrite(req_wrap, bufs, count, send_handle);
   bool async = err == 0;
@@ -203,7 +210,8 @@ StreamWriteResult StreamBase::Write(
     ClearError();
   }
 
-  return StreamWriteResult { async, err, req_wrap, total_bytes };
+  return StreamWriteResult {
+      async, err, req_wrap, total_bytes, std::move(req_wrap_ptr) };
 }
 
 template <typename OtherBase>
@@ -240,6 +248,28 @@ StreamBase* StreamBase::FromObject(v8::Local<v8::Object> obj) {
           StreamBase::kStreamBaseField));
 }
 
+WriteWrap* WriteWrap::FromObject(v8::Local<v8::Object> req_wrap_obj) {
+  return static_cast<WriteWrap*>(StreamReq::FromObject(req_wrap_obj));
+}
+
+template <typename T, bool kIsWeak>
+WriteWrap* WriteWrap::FromObject(
+    const BaseObjectPtrImpl<T, kIsWeak>& base_obj) {
+  if (!base_obj) return nullptr;
+  return FromObject(base_obj->object());
+}
+
+ShutdownWrap* ShutdownWrap::FromObject(v8::Local<v8::Object> req_wrap_obj) {
+  return static_cast<ShutdownWrap*>(StreamReq::FromObject(req_wrap_obj));
+}
+
+template <typename T, bool kIsWeak>
+ShutdownWrap* ShutdownWrap::FromObject(
+    const BaseObjectPtrImpl<T, kIsWeak>& base_obj) {
+  if (!base_obj) return nullptr;
+  return FromObject(base_obj->object());
+}
+
 void WriteWrap::SetAllocatedStorage(AllocatedBuffer&& storage) {
   CHECK_NULL(storage_.data());
   storage_ = std::move(storage);
@@ -249,6 +279,7 @@ void StreamReq::Done(int status, const char* error_str) {
   AsyncWrap* async_wrap = GetAsyncWrap();
   Environment* env = async_wrap->env();
   if (error_str != nullptr) {
+    v8::HandleScope handle_scope(env->isolate());
     async_wrap->object()->Set(env->context(),
                               env->error_string(),
                               OneByteString(env->isolate(), error_str))

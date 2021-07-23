@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const { inspect } = require('util');
 
+common.skipIfDumbTerminal();
 common.allowGlobals('aaaa');
 
 const tmpdir = require('../common/tmpdir');
@@ -70,7 +71,7 @@ const tests = [
       'ab = "aaaa"', ENTER,
       '555 - 909', ENTER,
       '{key : {key2 :[] }}', ENTER,
-      'Array(100).fill(1)', ENTER
+      'Array(100).fill(1)', ENTER,
     ],
     expected: [],
     clean: false
@@ -98,7 +99,7 @@ const tests = [
       SEARCH_BACKWARDS, // 15
       SEARCH_FORWARDS,
       ESCAPE,           // 17
-      ENTER
+      ENTER,
     ],
     // A = Cursor n up
     // B = Cursor n down
@@ -178,7 +179,7 @@ const tests = [
       '\x1B[1G', '\x1B[0J',
       prompt,
       '\x1B[3G',
-      '\r\n'
+      '\r\n',
     ],
     clean: false
   },
@@ -206,7 +207,7 @@ const tests = [
       UP,                // 15
       DOWN,
       SEARCH_FORWARDS,   // 17
-      '\n'
+      '\n',
     ],
     expected: [
       '\x1B[1G', '\x1B[0J',
@@ -261,10 +262,10 @@ const tests = [
       '-1\n',
       '\x1B[1G', '\x1B[0J',
       prompt, '\x1B[3G',
-      '\r\n'
+      '\r\n',
     ],
     clean: false
-  }
+  },
 ];
 const numtests = tests.length;
 

@@ -1,4 +1,5 @@
 #include "stream_pipe.h"
+#include "allocated_buffer-inl.h"
 #include "stream_base-inl.h"
 #include "node_buffer.h"
 #include "util-inl.h"
@@ -12,7 +13,6 @@ using v8::FunctionTemplate;
 using v8::HandleScope;
 using v8::Local;
 using v8::Object;
-using v8::String;
 using v8::Value;
 
 StreamPipe::StreamPipe(StreamBase* source,
@@ -118,7 +118,7 @@ uv_buf_t StreamPipe::ReadableListener::OnStreamAlloc(size_t suggested_size) {
   StreamPipe* pipe = ContainerOf(&StreamPipe::readable_listener_, this);
   size_t size = std::min(suggested_size, pipe->wanted_data_);
   CHECK_GT(size, 0);
-  return pipe->env()->AllocateManaged(size).release();
+  return AllocatedBuffer::AllocateManaged(pipe->env(), size).release();
 }
 
 void StreamPipe::ReadableListener::OnStreamRead(ssize_t nread,
@@ -292,20 +292,14 @@ void InitializeStreamPipe(Local<Object> target,
 
   // Create FunctionTemplate for FileHandle::CloseReq
   Local<FunctionTemplate> pipe = env->NewFunctionTemplate(StreamPipe::New);
-  Local<String> stream_pipe_string =
-      FIXED_ONE_BYTE_STRING(env->isolate(), "StreamPipe");
   env->SetProtoMethod(pipe, "unpipe", StreamPipe::Unpipe);
   env->SetProtoMethod(pipe, "start", StreamPipe::Start);
   env->SetProtoMethod(pipe, "isClosed", StreamPipe::IsClosed);
   env->SetProtoMethod(pipe, "pendingWrites", StreamPipe::PendingWrites);
   pipe->Inherit(AsyncWrap::GetConstructorTemplate(env));
-  pipe->SetClassName(stream_pipe_string);
   pipe->InstanceTemplate()->SetInternalFieldCount(
       StreamPipe::kInternalFieldCount);
-  target
-      ->Set(context, stream_pipe_string,
-            pipe->GetFunction(context).ToLocalChecked())
-      .Check();
+  env->SetConstructorFunction(target, "StreamPipe", pipe);
 }
 
 }  // anonymous namespace

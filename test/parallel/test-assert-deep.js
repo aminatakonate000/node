@@ -164,7 +164,7 @@ assert.throws(
     new Int32Array([1]), // Int32Array
     new Uint32Array([1]), // Uint32Array
     Buffer.from([1]), // Uint8Array
-    (function() { return arguments; })(1)
+    (function() { return arguments; })(1),
   ]);
 
   for (const a of similar) {
@@ -957,8 +957,6 @@ assertDeepAndStrictEqual(obj1, obj2);
 
 // Check proxies.
 {
-  // TODO(BridgeAR): Check if it would not be better to detect proxies instead
-  // of just using the proxy value.
   const arrProxy = new Proxy([1, 2], {});
   assert.deepStrictEqual(arrProxy, [1, 2]);
   const tmp = util.inspect.defaultOptions;
@@ -1195,4 +1193,14 @@ assert.throws(
   });
   Object.setPrototypeOf(b, null);
   assertNotDeepOrStrict(a, b, assert.AssertionError);
+}
+
+{
+  // Verify commutativity
+  // Regression test for https://github.com/nodejs/node/issues/37710
+  const a = { x: 1 };
+  const b = { y: 1 };
+  Object.defineProperty(b, 'x', { value: 1 });
+
+  assertNotDeepOrStrict(a, b);
 }

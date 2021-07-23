@@ -1,6 +1,7 @@
 #include "node_dir.h"
+#include "node_external_reference.h"
 #include "node_file-inl.h"
-#include "node_process.h"
+#include "node_process-inl.h"
 #include "memory_tracker-inl.h"
 #include "util.h"
 
@@ -28,7 +29,6 @@ using fs::GetReqWrap;
 
 using v8::Array;
 using v8::Context;
-using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
 using v8::HandleScope;
@@ -40,7 +40,6 @@ using v8::Null;
 using v8::Number;
 using v8::Object;
 using v8::ObjectTemplate;
-using v8::String;
 using v8::Value;
 
 #define TRACE_NAME(name) "fs_dir.sync." #name
@@ -109,9 +108,7 @@ inline void DirHandle::GCClose() {
   if (ret < 0) {
     // Do not unref this
     env()->SetImmediate([detail](Environment* env) {
-      char msg[70];
-      snprintf(msg, arraysize(msg),
-              "Closing directory handle on garbage collection failed");
+      const char* msg = "Closing directory handle on garbage collection failed";
       // This exception will end up being fatal for the process because
       // it is being thrown from within the SetImmediate handler and
       // there is no JS stack to bubble it to. In other words, tearing
@@ -126,10 +123,10 @@ inline void DirHandle::GCClose() {
   // to notify that the file descriptor was gc'd. We want to be noisy about
   // this because not explicitly closing the DirHandle is a bug.
 
-  env()->SetUnrefImmediate([](Environment* env) {
+  env()->SetImmediate([](Environment* env) {
     ProcessEmitWarning(env,
                        "Closing directory handle on garbage collection");
-  });
+  }, CallbackFlags::kUnrefed);
 }
 
 void AfterClose(uv_fs_t* req) {
@@ -197,8 +194,8 @@ static MaybeLocal<Array> DirentListToArray(
 }
 
 static void AfterDirRead(uv_fs_t* req) {
-  FSReqBase* req_wrap = FSReqBase::from_req(req);
-  FSReqAfterScope after(req_wrap, req);
+  BaseObjectPtr<FSReqBase> req_wrap { FSReqBase::from_req(req) };
+  FSReqAfterScope after(req_wrap.get(), req);
 
   if (!after.Proceed()) {
     return;
@@ -210,23 +207,28 @@ static void AfterDirRead(uv_fs_t* req) {
   if (req->result == 0) {
     // Done
     Local<Value> done = Null(isolate);
+    after.Clear();
     req_wrap->Resolve(done);
     return;
   }
 
   uv_dir_t* dir = static_cast<uv_dir_t*>(req->ptr);
-  req->ptr = nullptr;
 
   Local<Value> error;
   Local<Array> js_array;
   if (!DirentListToArray(env,
                          dir->dirents,
-                         req->result,
+                         static_cast<int>(req->result),
                          req_wrap->encoding(),
-                         &error).ToLocal(&js_array)) {
+                         &error)
+           .ToLocal(&js_array)) {
+    // Clear libuv resources *before* delivering results to JS land because
+    // that can schedule another operation on the same uv_dir_t. Ditto below.
+    after.Clear();
     return req_wrap->Reject(error);
   }
 
+  after.Clear();
   req_wrap->Resolve(js_array);
 }
 
@@ -244,7 +246,7 @@ void DirHandle::Read(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&dir, args.Holder());
 
   CHECK(args[1]->IsNumber());
-  uint64_t buffer_size = args[1].As<Number>()->Value();
+  uint64_t buffer_size = static_cast<uint64_t>(args[1].As<Number>()->Value());
 
   if (buffer_size != dir->dirents_.size()) {
     dir->dirents_.resize(buffer_size);
@@ -280,9 +282,10 @@ void DirHandle::Read(const FunctionCallbackInfo<Value>& args) {
     Local<Array> js_array;
     if (!DirentListToArray(env,
                            dir->dir()->dirents,
-                           req_wrap_sync.req.result,
+                           static_cast<int>(req_wrap_sync.req.result),
                            encoding,
-                           &error).ToLocal(&js_array)) {
+                           &error)
+             .ToLocal(&js_array)) {
       Local<Object> ctx = args[2].As<Object>();
       USE(ctx->Set(env->context(), env->error_string(), error));
       return;
@@ -348,7 +351,6 @@ void Initialize(Local<Object> target,
                 Local<Context> context,
                 void* priv) {
   Environment* env = Environment::GetCurrent(context);
-  Isolate* isolate = env->isolate();
 
   env->SetMethod(target, "opendir", OpenDir);
 
@@ -359,14 +361,15 @@ void Initialize(Local<Object> target,
   env->SetProtoMethod(dir, "close", DirHandle::Close);
   Local<ObjectTemplate> dirt = dir->InstanceTemplate();
   dirt->SetInternalFieldCount(DirHandle::kInternalFieldCount);
-  Local<String> handleString =
-       FIXED_ONE_BYTE_STRING(isolate, "DirHandle");
-  dir->SetClassName(handleString);
-  target
-      ->Set(context, handleString,
-            dir->GetFunction(env->context()).ToLocalChecked())
-      .FromJust();
+  env->SetConstructorFunction(target, "DirHandle", dir);
   env->set_dir_instance_template(dirt);
+}
+
+void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+  registry->Register(OpenDir);
+  registry->Register(DirHandle::New);
+  registry->Register(DirHandle::Read);
+  registry->Register(DirHandle::Close);
 }
 
 }  // namespace fs_dir
@@ -374,3 +377,4 @@ void Initialize(Local<Object> target,
 }  // end namespace node
 
 NODE_MODULE_CONTEXT_AWARE_INTERNAL(fs_dir, node::fs_dir::Initialize)
+NODE_MODULE_EXTERNAL_REFERENCE(fs_dir, node::fs_dir::RegisterExternalReferences)

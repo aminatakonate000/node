@@ -6,9 +6,9 @@
 
 #include "src/builtins/builtins.h"
 #include "src/builtins/constants-table-builder.h"
+#include "src/codegen/external-reference-encoder.h"
 #include "src/execution/isolate-data.h"
 #include "src/execution/isolate-inl.h"
-#include "src/snapshot/serializer-common.h"
 
 namespace v8 {
 namespace internal {
@@ -113,13 +113,6 @@ bool TurboAssemblerBase::IsAddressableThroughRootRegister(
     Isolate* isolate, const ExternalReference& reference) {
   Address address = reference.address();
   return isolate->root_register_addressable_region().contains(address);
-}
-
-void TurboAssemblerBase::RecordCommentForOffHeapTrampoline(int builtin_index) {
-  if (!FLAG_code_comments) return;
-  std::ostringstream str;
-  str << "-- Inlined Trampoline to " << Builtins::name(builtin_index) << " --";
-  RecordComment(str.str().c_str());
 }
 
 }  // namespace internal

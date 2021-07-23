@@ -28,7 +28,14 @@ RUNTIME_FUNCTION(Runtime_TransitionElementsKind) {
   CONVERT_ARG_HANDLE_CHECKED(JSObject, object, 0);
   CONVERT_ARG_HANDLE_CHECKED(Map, to_map, 1);
   ElementsKind to_kind = to_map->elements_kind();
-  ElementsAccessor::ForKind(to_kind)->TransitionElementsKind(object, to_map);
+  if (ElementsAccessor::ForKind(to_kind)
+          ->TransitionElementsKind(object, to_map)
+          .IsNothing()) {
+    // TODO(victorgomes): EffectControlLinearizer::LowerTransitionElementsKind
+    // does not handle exceptions.
+    FATAL("Fatal JavaScript invalid array size");
+    UNREACHABLE();
+  }
   return *object;
 }
 
@@ -46,9 +53,9 @@ RUNTIME_FUNCTION(Runtime_NewArray) {
   HandleScope scope(isolate);
   DCHECK_LE(3, args.length());
   int const argc = args.length() - 3;
-  // TODO(bmeurer): Remove this Arguments nonsense.
-  Arguments argv(argc, args.address_of_arg_at(1));
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, constructor, 0);
+  // argv points to the arguments constructed by the JavaScript call.
+  JavaScriptArguments argv(argc, args.address_of_arg_at(0));
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, constructor, argc);
   CONVERT_ARG_HANDLE_CHECKED(JSReceiver, new_target, argc + 1);
   CONVERT_ARG_HANDLE_CHECKED(HeapObject, type_info, argc + 2);
   // TODO(bmeurer): Use MaybeHandle to pass around the AllocationSite.
@@ -180,7 +187,11 @@ RUNTIME_FUNCTION(Runtime_GrowArrayElements) {
   uint32_t capacity = static_cast<uint32_t>(object->elements().length());
 
   if (index >= capacity) {
-    if (!object->GetElementsAccessor()->GrowCapacity(object, index)) {
+    bool has_grown;
+    MAYBE_ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, has_grown,
+        object->GetElementsAccessor()->GrowCapacity(object, index));
+    if (!has_grown) {
       return Smi::zero();
     }
   }

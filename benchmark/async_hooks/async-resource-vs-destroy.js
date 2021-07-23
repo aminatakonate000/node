@@ -101,7 +101,7 @@ function buildDestroy(getServe) {
 function buildAsyncLocalStorage(getServe) {
   const asyncLocalStorage = new AsyncLocalStorage();
   const server = createServer((req, res) => {
-    asyncLocalStorage.runSyncAndReturn({}, () => {
+    asyncLocalStorage.run({}, () => {
       getServe(getCLS, setCLS)(req, res);
     });
   });
@@ -138,6 +138,7 @@ function getServeAwait(getCLS, setCLS) {
     setCLS(Math.random());
     await sleep(10);
     await read(__filename);
+    if (res.destroyed) return;
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ cls: getCLS() }));
   };
@@ -148,6 +149,7 @@ function getServeCallbacks(getCLS, setCLS) {
     setCLS(Math.random());
     setTimeout(() => {
       readFile(__filename, () => {
+        if (res.destroyed) return;
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ cls: getCLS() }));
       });

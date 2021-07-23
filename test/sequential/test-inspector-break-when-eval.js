@@ -36,9 +36,7 @@ async function breakOnLine(session) {
       'params': { 'lineNumber': 9,
                   'url': pathToFileURL(script).toString(),
                   'columnNumber': 0,
-                  'condition': ''
-      }
-    },
+                  'condition': '' } },
     { 'method': 'Runtime.evaluate',
       'params': { 'expression': 'sum()',
                   'objectGroup': 'console',
@@ -48,9 +46,7 @@ async function breakOnLine(session) {
                   'returnByValue': false,
                   'generatePreview': true,
                   'userGesture': true,
-                  'awaitPromise': false
-      }
-    }
+                  'awaitPromise': false } },
   ];
   session.send(commands);
   await session.waitForBreakOnLine(9, pathToFileURL(script).toString());
@@ -75,4 +71,4 @@ async function runTests() {
   assert.strictEqual((await child.expectShutdown()).exitCode, 0);
 }
 
-runTests();
+runTests().then(common.mustCall());

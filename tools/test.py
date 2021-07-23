@@ -116,6 +116,25 @@ class ProgressIndicator(object):
     self.lock = threading.Lock()
     self.shutdown_event = threading.Event()
 
+  def GetFailureOutput(self, failure):
+    output = []
+    if failure.output.stderr:
+      output += ["--- stderr ---" ]
+      output += [failure.output.stderr.strip()]
+    if failure.output.stdout:
+      output += ["--- stdout ---"]
+      output += [failure.output.stdout.strip()]
+    output += ["Command: %s" % EscapeCommand(failure.command)]
+    if failure.HasCrashed():
+      output += ["--- %s ---" % PrintCrashed(failure.output.exit_code)]
+    if failure.HasTimedOut():
+      output += ["--- TIMEOUT ---"]
+    output = "\n".join(output)
+    return output
+
+  def PrintFailureOutput(self, failure):
+    print(self.GetFailureOutput(failure))
+
   def PrintFailureHeader(self, test):
     if test.IsNegative():
       negative_marker = '[negative] '
@@ -142,7 +161,7 @@ class ProgressIndicator(object):
       # Wait for the remaining threads
       for thread in threads:
         # Use a timeout so that signals (ctrl-c) will be processed.
-        thread.join(timeout=10000000)
+        thread.join(timeout=1000000)
     except (KeyboardInterrupt, SystemExit):
       self.shutdown_event.set()
     except Exception:
@@ -224,17 +243,7 @@ class SimpleProgressIndicator(ProgressIndicator):
     print()
     for failed in self.failed:
       self.PrintFailureHeader(failed.test)
-      if failed.output.stderr:
-        print("--- stderr ---")
-        print(failed.output.stderr.strip())
-      if failed.output.stdout:
-        print("--- stdout ---")
-        print(failed.output.stdout.strip())
-      print("Command: %s" % EscapeCommand(failed.command))
-      if failed.HasCrashed():
-        print("--- %s ---" % PrintCrashed(failed.output.exit_code))
-      if failed.HasTimedOut():
-        print("--- TIMEOUT ---")
+      self.PrintFailureOutput(failed)
     if len(self.failed) == 0:
       print("===")
       print("=== All tests succeeded")
@@ -288,6 +297,21 @@ class DotsProgressIndicator(SimpleProgressIndicator):
       sys.stdout.write('.')
       sys.stdout.flush()
 
+class ActionsAnnotationProgressIndicator(DotsProgressIndicator):
+  def GetAnnotationInfo(self, test, output):
+    traceback = output.stdout + output.stderr
+    find_full_path = re.search(r' +at .*\(.*%s:([0-9]+):([0-9]+)' % test.file, traceback)
+    col = line = 0
+    if find_full_path:
+        line, col = map(int, find_full_path.groups())
+    root_path = abspath(join(dirname(__file__), '../')) + os.sep
+    filename = test.file.replace(root_path, "")
+    return filename, line, col
+
+  def PrintFailureOutput(self, failure):
+    output = self.GetFailureOutput(failure)
+    filename, line, column = self.GetAnnotationInfo(failure.test, failure.output)
+    print("::error file=%s,line=%d,col=%d::%s" % (filename, line, column, output.replace('\n', '%0A')))
 
 class TapProgressIndicator(SimpleProgressIndicator):
 
@@ -351,7 +375,10 @@ class TapProgressIndicator(SimpleProgressIndicator):
 
       if output.diagnostic:
         self.severity = 'ok'
-        self.traceback = output.diagnostic
+        if isinstance(output.diagnostic, list):
+          self.traceback = '\n'.join(output.diagnostic)
+        else:
+          self.traceback = output.diagnostic
 
 
     duration = output.test.duration
@@ -496,6 +523,7 @@ class MonochromeProgressIndicator(CompactProgressIndicator):
 PROGRESS_INDICATORS = {
   'verbose': VerboseProgressIndicator,
   'dots': DotsProgressIndicator,
+  'actions': ActionsAnnotationProgressIndicator,
   'color': ColorProgressIndicator,
   'tap': TapProgressIndicator,
   'mono': MonochromeProgressIndicator,
@@ -549,7 +577,7 @@ class TestCase(object):
     full_command = self.context.processor(command)
     output = Execute(full_command,
                      self.context,
-                     self.context.GetTimeout(self.mode),
+                     self.context.GetTimeout(self.mode, self.config.section),
                      env,
                      disable_core_files = self.disable_core_files)
     return TestOutput(self,
@@ -868,8 +896,7 @@ class LiteralTestSuite(TestSuite):
 
 
 TIMEOUT_SCALEFACTOR = {
-    'armv6' : { 'debug' : 12, 'release' : 3 },  # The ARM buildbots are slow.
-    'arm'   : { 'debug' :  8, 'release' : 2 },
+    'arm'   : { 'debug' :  8, 'release' : 2 }, # The ARM buildbots are slow.
     'ia32'  : { 'debug' :  4, 'release' : 1 },
     'ppc'   : { 'debug' :  4, 'release' : 1 },
     's390'  : { 'debug' :  4, 'release' : 1 } }
@@ -915,8 +942,11 @@ class Context(object):
 
     return name
 
-  def GetTimeout(self, mode):
-    return self.timeout * TIMEOUT_SCALEFACTOR[ARCH_GUESS or 'ia32'][mode]
+  def GetTimeout(self, mode, section=''):
+    timeout = self.timeout * TIMEOUT_SCALEFACTOR[ARCH_GUESS or 'ia32'][mode]
+    if section == 'pummel':
+      timeout = timeout * 4
+    return timeout
 
 def RunTestCases(cases_to_run, progress, tasks, flaky_tests_mode):
   progress = PROGRESS_INDICATORS[progress](cases_to_run, flaky_tests_mode)
@@ -1299,7 +1329,7 @@ def BuildOptions():
   result.add_option('--logfile', dest='logfile',
       help='write test output to file. NOTE: this only applies the tap progress indicator')
   result.add_option("-p", "--progress",
-      help="The style of progress indicator (verbose, dots, color, mono, tap)",
+      help="The style of progress indicator (%s)" % ", ".join(PROGRESS_INDICATORS.keys()),
       choices=list(PROGRESS_INDICATORS.keys()), default="mono")
   result.add_option("--report", help="Print a summary of the tests to be run",
       default=False, action="store_true")

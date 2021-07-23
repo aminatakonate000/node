@@ -91,20 +91,6 @@
                 'x86.c',
               ],
               'conditions': [
-                ['OS!="win" or llvm_version!="0.0"', {
-                  'cflags': [
-                    '-mssse3',
-                    '-msse4.2',
-                    '-mpclmul',
-                  ],
-                  'xcode_settings': {
-                    'OTHER_CFLAGS': [
-                      '-mssse3',
-                      '-msse4.2',
-                      '-mpclmul',
-                    ],
-                  },
-                }],
                 ['target_arch=="x64"', {
                   'defines': [ 'INFLATE_CHUNK_READ_64LE' ],
                 }],
@@ -136,7 +122,7 @@
                     ['OS=="linux"', {
                       'defines': [ 'ARMV8_OS_LINUX' ],
                     }],
-                    ['OS="win"', {
+                    ['OS=="win"', {
                       'defines': [ 'ARMV8_OS_WINDOWS' ],
                     }],
                     ['OS!="android" and OS!="win" and llvm_version=="0.0"', {

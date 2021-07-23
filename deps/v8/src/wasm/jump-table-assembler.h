@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !V8_ENABLE_WEBASSEMBLY
+#error This header should only be included if WebAssembly is enabled.
+#endif  // !V8_ENABLE_WEBASSEMBLY
+
 #ifndef V8_WASM_JUMP_TABLE_ASSEMBLER_H_
 #define V8_WASM_JUMP_TABLE_ASSEMBLER_H_
 
@@ -20,9 +24,8 @@ namespace wasm {
 // other purposes:
 // - the far stub table contains one entry per wasm runtime stub (see
 //   {WasmCode::RuntimeStubId}, which jumps to the corresponding embedded
-//   builtin, plus (if {FLAG_wasm_far_jump_table} is enabled and not the full
-//   address space can be reached via the jump table) one entry per wasm
-//   function.
+//   builtin, plus (if not the full address space can be reached via the jump
+//   table) one entry per wasm function.
 // - the lazy compile table contains one entry per wasm function which jumps to
 //   the common {WasmCompileLazy} builtin and passes the function index that was
 //   invoked.
@@ -186,7 +189,12 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
   static constexpr int kJumpTableSlotSize = 3 * kInstrSize;
   static constexpr int kFarJumpTableSlotSize = 2 * kInstrSize;
   static constexpr int kLazyCompileTableSlotSize = 5 * kInstrSize;
-#elif V8_TARGET_ARCH_ARM64
+#elif V8_TARGET_ARCH_ARM64 && V8_ENABLE_CONTROL_FLOW_INTEGRITY
+  static constexpr int kJumpTableLineSize = 2 * kInstrSize;
+  static constexpr int kJumpTableSlotSize = 2 * kInstrSize;
+  static constexpr int kFarJumpTableSlotSize = 6 * kInstrSize;
+  static constexpr int kLazyCompileTableSlotSize = 4 * kInstrSize;
+#elif V8_TARGET_ARCH_ARM64 && !V8_ENABLE_CONTROL_FLOW_INTEGRITY
   static constexpr int kJumpTableLineSize = 1 * kInstrSize;
   static constexpr int kJumpTableSlotSize = 1 * kInstrSize;
   static constexpr int kFarJumpTableSlotSize = 4 * kInstrSize;
@@ -211,6 +219,11 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
   static constexpr int kJumpTableSlotSize = 8 * kInstrSize;
   static constexpr int kFarJumpTableSlotSize = 6 * kInstrSize;
   static constexpr int kLazyCompileTableSlotSize = 8 * kInstrSize;
+#elif V8_TARGET_ARCH_RISCV64
+  static constexpr int kJumpTableLineSize = 6 * kInstrSize;
+  static constexpr int kJumpTableSlotSize = 6 * kInstrSize;
+  static constexpr int kFarJumpTableSlotSize = 6 * kInstrSize;
+  static constexpr int kLazyCompileTableSlotSize = 10 * kInstrSize;
 #else
 #error Unknown architecture.
 #endif

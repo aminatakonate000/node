@@ -12,6 +12,7 @@ const testResourceLimits = {
   maxOldGenerationSizeMb: 16,
   maxYoungGenerationSizeMb: 4,
   codeRangeSizeMb: 16,
+  stackSizeMb: 1,
 };
 
 // Do not use isMainThread so that this test itself can be run inside a Worker.
@@ -34,9 +35,10 @@ if (!process.env.HAS_STARTED_WORKER) {
 assert.deepStrictEqual(resourceLimits, testResourceLimits);
 const array = [];
 while (true) {
-  // Leave 10 % wiggle room here.
+  // Leave 10% wiggle room here, and 20% on debug builds.
+  const wiggleRoom = common.buildType === 'Release' ? 1.1 : 1.2;
   const usedMB = v8.getHeapStatistics().used_heap_size / 1024 / 1024;
-  assert(usedMB < resourceLimits.maxOldGenerationSizeMb * 1.1);
+  assert(usedMB < resourceLimits.maxOldGenerationSizeMb * wiggleRoom);
 
   let seenSpaces = 0;
   for (const { space_name, space_size } of v8.getHeapSpaceStatistics()) {

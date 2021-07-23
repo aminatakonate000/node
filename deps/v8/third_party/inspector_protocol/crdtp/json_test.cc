@@ -118,6 +118,30 @@ TEST(JsonEncoder, EscapesFFFF) {
   EXPECT_EQ("\"abc\\uffffd\"", out);
 }
 
+TEST(JsonEncoder, Passes0x7FString8) {
+  std::vector<uint8_t> chars = {'a', 0x7f, 'b'};
+  std::string out;
+  Status status;
+  std::unique_ptr<ParserHandler> writer = NewJSONEncoder(&out, &status);
+  writer->HandleString8(span<uint8_t>(chars.data(), chars.size()));
+  EXPECT_EQ(
+      "\"a\x7f"
+      "b\"",
+      out);
+}
+
+TEST(JsonEncoder, Passes0x7FString16) {
+  std::vector<uint16_t> chars16 = {'a', 0x7f, 'b'};
+  std::string out;
+  Status status;
+  std::unique_ptr<ParserHandler> writer = NewJSONEncoder(&out, &status);
+  writer->HandleString16(span<uint16_t>(chars16.data(), chars16.size()));
+  EXPECT_EQ(
+      "\"a\x7f"
+      "b\"",
+      out);
+}
+
 TEST(JsonEncoder, IncompleteUtf8Sequence) {
   std::string out;
   Status status;
@@ -181,6 +205,32 @@ TEST(JsonStdStringWriterTest, HelloWorld) {
       "\"msg2\":\"\\\\\\b\\r\\n\\t\\f\\\"\","
       "\"nested\":{\"double\":3.1415,\"int\":-42,"
       "\"bool\":false,\"null\":null},\"array\":[1,2,3]}",
+      out);
+}
+
+TEST(JsonStdStringWriterTest, ScalarsAreRenderedAsInt) {
+  // Test that Number.MIN_SAFE_INTEGER / Number.MAX_SAFE_INTEGER from Javascript
+  // are rendered as integers (no decimal point / rounding), even when we
+  // encode them from double. Javascript's Number is an IEE754 double, so
+  // it has 53 bits to represent integers.
+  std::string out;
+  Status status;
+  std::unique_ptr<ParserHandler> writer = NewJSONEncoder(&out, &status);
+  writer->HandleMapBegin();
+
+  writer->HandleString8(SpanFrom("Number.MIN_SAFE_INTEGER"));
+  EXPECT_EQ(-0x1fffffffffffff, -9007199254740991);  // 53 bits for integers.
+  writer->HandleDouble(-9007199254740991);          // Note HandleDouble here.
+
+  writer->HandleString8(SpanFrom("Number.MAX_SAFE_INTEGER"));
+  EXPECT_EQ(0x1fffffffffffff, 9007199254740991);  // 53 bits for integers.
+  writer->HandleDouble(9007199254740991);         // Note HandleDouble here.
+
+  writer->HandleMapEnd();
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(
+      "{\"Number.MIN_SAFE_INTEGER\":-9007199254740991,"
+      "\"Number.MAX_SAFE_INTEGER\":9007199254740991}",
       out);
 }
 

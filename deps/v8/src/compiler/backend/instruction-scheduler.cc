@@ -108,7 +108,7 @@ void InstructionScheduler::EndBlock(RpoNumber rpo) {
 }
 
 void InstructionScheduler::AddTerminator(Instruction* instr) {
-  ScheduleGraphNode* new_node = new (zone()) ScheduleGraphNode(zone(), instr);
+  ScheduleGraphNode* new_node = zone()->New<ScheduleGraphNode>(zone(), instr);
   // Make sure that basic block terminators are not moved by adding them
   // as successor of every instruction.
   for (ScheduleGraphNode* node : graph_) {
@@ -128,7 +128,7 @@ void InstructionScheduler::AddInstruction(Instruction* instr) {
     return;
   }
 
-  ScheduleGraphNode* new_node = new (zone()) ScheduleGraphNode(zone(), instr);
+  ScheduleGraphNode* new_node = zone()->New<ScheduleGraphNode>(zone(), instr);
 
   // We should not have branches in the middle of a block.
   DCHECK_NE(instr->flags_mode(), kFlags_branch);
@@ -263,7 +263,6 @@ int InstructionScheduler::GetInstructionFlags(const Instruction* instr) const {
     case kArchDeoptimize:
     case kArchJmp:
     case kArchBinarySearchSwitch:
-    case kArchLookupSwitch:
     case kArchRet:
     case kArchTableSwitch:
     case kArchThrowTerminator:
@@ -306,10 +305,11 @@ int InstructionScheduler::GetInstructionFlags(const Instruction* instr) const {
 
     case kArchPrepareCallCFunction:
     case kArchPrepareTailCall:
-    case kArchTailCallCodeObjectFromJSFunction:
     case kArchTailCallCodeObject:
     case kArchTailCallAddress:
+#if V8_ENABLE_WEBASSEMBLY
     case kArchTailCallWasm:
+#endif  // V8_ENABLE_WEBASSEMBLY
     case kArchAbortCSAAssert:
       return kHasSideEffect;
 
@@ -323,7 +323,9 @@ int InstructionScheduler::GetInstructionFlags(const Instruction* instr) const {
     case kArchCallCFunction:
     case kArchCallCodeObject:
     case kArchCallJSFunction:
+#if V8_ENABLE_WEBASSEMBLY
     case kArchCallWasmFunction:
+#endif  // V8_ENABLE_WEBASSEMBLY
     case kArchCallBuiltinPointer:
       // Calls can cause GC and GC may relocate objects. If a pure instruction
       // operates on a tagged pointer that was cast to a word then it may be

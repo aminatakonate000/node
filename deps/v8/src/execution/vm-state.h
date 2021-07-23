@@ -11,11 +11,10 @@
 namespace v8 {
 namespace internal {
 
-// Logging and profiling.  A StateTag represents a possible state of
-// the VM. The logger maintains a stack of these. Creating a VMState
-// object enters a state by pushing on the stack, and destroying a
-// VMState object leaves a state by popping the current state from the
-// stack.
+// Logging and profiling. A StateTag represents a possible state of the VM. The
+// logger maintains a stack of these. Creating a VMState object enters a state
+// by pushing on the stack, and destroying a VMState object leaves a state by
+// popping the current state from the stack.
 template <StateTag Tag>
 class VMState {
  public:
@@ -27,7 +26,7 @@ class VMState {
   StateTag previous_tag_;
 };
 
-class ExternalCallbackScope {
+class V8_NODISCARD ExternalCallbackScope {
  public:
   inline ExternalCallbackScope(Isolate* isolate, Address callback);
   inline ~ExternalCallbackScope();

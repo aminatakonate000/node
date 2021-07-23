@@ -81,7 +81,7 @@ class ConstantPoolEntry {
   enum { SHARING_PROHIBITED = -2, SHARING_ALLOWED = -1 };
 };
 
-#if defined(V8_TARGET_ARCH_PPC)
+#if defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_PPC64)
 
 // -----------------------------------------------------------------------------
 // Embedded constant pool support
@@ -161,9 +161,9 @@ class ConstantPoolBuilder {
   PerTypeEntryInfo info_[ConstantPoolEntry::NUMBER_OF_TYPES];
 };
 
-#endif  // defined(V8_TARGET_ARCH_PPC)
+#endif  // defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_PPC64)
 
-#if defined(V8_TARGET_ARCH_ARM64)
+#if defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_RISCV64)
 
 class ConstantPoolKey {
  public:
@@ -282,7 +282,7 @@ class ConstantPool {
   void SetNextCheckIn(size_t instructions);
 
   // Class for scoping postponing the constant pool generation.
-  class V8_EXPORT_PRIVATE BlockScope {
+  class V8_EXPORT_PRIVATE V8_NODISCARD BlockScope {
    public:
     // BlockScope immediatelly emits the pool if necessary to ensure that
     // during the block scope at least {margin} bytes can be emitted without

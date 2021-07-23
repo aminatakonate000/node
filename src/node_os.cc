@@ -71,8 +71,7 @@ static void GetHostname(const FunctionCallbackInfo<Value>& args) {
   }
 
   args.GetReturnValue().Set(
-      String::NewFromUtf8(env->isolate(), buf, NewStringType::kNormal)
-          .ToLocalChecked());
+      String::NewFromUtf8(env->isolate(), buf).ToLocalChecked());
 }
 
 static void GetOSInformation(const FunctionCallbackInfo<Value>& args) {
@@ -113,16 +112,22 @@ static void GetCPUInfo(const FunctionCallbackInfo<Value>& args) {
   // assemble them into objects in JS than to call Object::Set() repeatedly
   // The array is in the format
   // [model, speed, (5 entries of cpu_times), model2, speed2, ...]
-  std::vector<Local<Value>> result(count * 7);
-  for (int i = 0, j = 0; i < count; i++) {
+  std::vector<Local<Value>> result;
+  result.reserve(count * 7);
+  for (int i = 0; i < count; i++) {
     uv_cpu_info_t* ci = cpu_infos + i;
-    result[j++] = OneByteString(isolate, ci->model);
-    result[j++] = Number::New(isolate, ci->speed);
-    result[j++] = Number::New(isolate, ci->cpu_times.user);
-    result[j++] = Number::New(isolate, ci->cpu_times.nice);
-    result[j++] = Number::New(isolate, ci->cpu_times.sys);
-    result[j++] = Number::New(isolate, ci->cpu_times.idle);
-    result[j++] = Number::New(isolate, ci->cpu_times.irq);
+    result.emplace_back(OneByteString(isolate, ci->model));
+    result.emplace_back(Number::New(isolate, ci->speed));
+    result.emplace_back(
+        Number::New(isolate, static_cast<double>(ci->cpu_times.user)));
+    result.emplace_back(
+        Number::New(isolate, static_cast<double>(ci->cpu_times.nice)));
+    result.emplace_back(
+        Number::New(isolate, static_cast<double>(ci->cpu_times.sys)));
+    result.emplace_back(
+        Number::New(isolate, static_cast<double>(ci->cpu_times.idle)));
+    result.emplace_back(
+        Number::New(isolate, static_cast<double>(ci->cpu_times.irq)));
   }
 
   uv_free_cpu_info(cpu_infos, count);
@@ -131,17 +136,13 @@ static void GetCPUInfo(const FunctionCallbackInfo<Value>& args) {
 
 
 static void GetFreeMemory(const FunctionCallbackInfo<Value>& args) {
-  double amount = uv_get_free_memory();
-  if (amount < 0)
-    return;
+  double amount = static_cast<double>(uv_get_free_memory());
   args.GetReturnValue().Set(amount);
 }
 
 
 static void GetTotalMemory(const FunctionCallbackInfo<Value>& args) {
-  double amount = uv_get_total_memory();
-  if (amount < 0)
-    return;
+  double amount = static_cast<double>(uv_get_total_memory());
   args.GetReturnValue().Set(amount);
 }
 
@@ -187,7 +188,8 @@ static void GetInterfaceAddresses(const FunctionCallbackInfo<Value>& args) {
   }
 
   Local<Value> no_scope_id = Integer::New(isolate, -1);
-  std::vector<Local<Value>> result(count * 7);
+  std::vector<Local<Value>> result;
+  result.reserve(count * 7);
   for (i = 0; i < count; i++) {
     const char* const raw_name = interfaces[i].name;
 
@@ -196,8 +198,7 @@ static void GetInterfaceAddresses(const FunctionCallbackInfo<Value>& args) {
     // to assume UTF8 as the default as well. It’s what people will expect if
     // they name the interface from any input that uses UTF-8, which should be
     // the most frequent case by far these days.)
-    name = String::NewFromUtf8(isolate, raw_name,
-        v8::NewStringType::kNormal).ToLocalChecked();
+    name = String::NewFromUtf8(isolate, raw_name).ToLocalChecked();
 
     snprintf(mac.data(),
              mac.size(),
@@ -222,18 +223,18 @@ static void GetInterfaceAddresses(const FunctionCallbackInfo<Value>& args) {
       family = env->unknown_string();
     }
 
-    result[i * 7] = name;
-    result[i * 7 + 1] = OneByteString(isolate, ip);
-    result[i * 7 + 2] = OneByteString(isolate, netmask);
-    result[i * 7 + 3] = family;
-    result[i * 7 + 4] = FIXED_ONE_BYTE_STRING(isolate, mac);
-    result[i * 7 + 5] =
-      interfaces[i].is_internal ? True(isolate) : False(isolate);
+    result.emplace_back(name);
+    result.emplace_back(OneByteString(isolate, ip));
+    result.emplace_back(OneByteString(isolate, netmask));
+    result.emplace_back(family);
+    result.emplace_back(FIXED_ONE_BYTE_STRING(isolate, mac));
+    result.emplace_back(
+        interfaces[i].is_internal ? True(isolate) : False(isolate));
     if (interfaces[i].address.address4.sin_family == AF_INET6) {
       uint32_t scopeid = interfaces[i].address.address6.sin6_scope_id;
-      result[i * 7 + 6] = Integer::NewFromUnsigned(isolate, scopeid);
+      result.emplace_back(Integer::NewFromUnsigned(isolate, scopeid));
     } else {
-      result[i * 7 + 6] = no_scope_id;
+      result.emplace_back(no_scope_id);
     }
   }
 
@@ -257,7 +258,7 @@ static void GetHomeDirectory(const FunctionCallbackInfo<Value>& args) {
 
   Local<String> home = String::NewFromUtf8(env->isolate(),
                                            buf,
-                                           v8::NewStringType::kNormal,
+                                           NewStringType::kNormal,
                                            len).ToLocalChecked();
   args.GetReturnValue().Set(home);
 }
@@ -272,10 +273,10 @@ static void GetUserInfo(const FunctionCallbackInfo<Value>& args) {
     Local<Object> options = args[0].As<Object>();
     MaybeLocal<Value> maybe_encoding = options->Get(env->context(),
                                                     env->encoding_string());
-    if (maybe_encoding.IsEmpty())
-      return;
+    Local<Value> encoding_opt;
+    if (!maybe_encoding.ToLocal(&encoding_opt))
+        return;
 
-    Local<Value> encoding_opt = maybe_encoding.ToLocalChecked();
     encoding = ParseEncoding(env->isolate(), encoding_opt, UTF8);
   } else {
     encoding = UTF8;

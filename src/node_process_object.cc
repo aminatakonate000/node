@@ -1,8 +1,10 @@
 #include "env-inl.h"
+#include "node_errors.h"
+#include "node_external_reference.h"
 #include "node_internals.h"
-#include "node_options-inl.h"
 #include "node_metadata.h"
-#include "node_process.h"
+#include "node_options-inl.h"
+#include "node_process-inl.h"
 #include "node_revert.h"
 #include "util-inl.h"
 
@@ -15,10 +17,8 @@ using v8::EscapableHandleScope;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
-using v8::HandleScope;
 using v8::Integer;
 using v8::Isolate;
-using v8::Just;
 using v8::Local;
 using v8::MaybeLocal;
 using v8::Name;
@@ -61,6 +61,13 @@ static void DebugPortSetter(Local<Name> property,
                             const PropertyCallbackInfo<void>& info) {
   Environment* env = Environment::GetCurrent(info);
   int32_t port = value->Int32Value(env->context()).FromMaybe(0);
+
+  if ((port != 0 && port < 1024) || port > 65535) {
+    return THROW_ERR_OUT_OF_RANGE(
+      env,
+      "process.debugPort must be 0 or in range 1024 to 65535");
+  }
+
   ExclusiveAccess<HostPort>::Scoped host_port(env->inspector_host_port());
   host_port->set_port(static_cast<int>(port));
 }
@@ -147,7 +154,7 @@ void PatchProcessObject(const FunctionCallbackInfo<Value>& args) {
                 FIXED_ONE_BYTE_STRING(isolate, "title"),
                 ProcessTitleGetter,
                 env->owns_process_state() ? ProcessTitleSetter : nullptr,
-                env->current_callback_data(),
+                Local<Value>(),
                 DEFAULT,
                 None,
                 SideEffectType::kHasNoSideEffect)
@@ -198,8 +205,15 @@ void PatchProcessObject(const FunctionCallbackInfo<Value>& args) {
                           FIXED_ONE_BYTE_STRING(isolate, "debugPort"),
                           DebugPortGetter,
                           env->owns_process_state() ? DebugPortSetter : nullptr,
-                          env->current_callback_data())
+                          Local<Value>())
             .FromJust());
 }
 
+void RegisterProcessExternalReferences(ExternalReferenceRegistry* registry) {
+  registry->Register(RawDebug);
+}
+
 }  // namespace node
+
+NODE_MODULE_EXTERNAL_REFERENCE(process_object,
+                               node::RegisterProcessExternalReferences)

@@ -8,6 +8,7 @@
 #include "src/ast/ast-value-factory.h"
 #include "src/base/threaded-list.h"
 #include "src/common/globals.h"
+#include "src/execution/isolate.h"
 #include "src/zone/zone.h"
 
 namespace v8 {
@@ -57,7 +58,7 @@ class Variable final : public ZoneObject {
   // parameter initializers.
   void set_scope(Scope* scope) { scope_ = scope; }
 
-  Handle<String> name() const { return name_->string().get<Factory>(); }
+  Handle<String> name() const { return name_->string(); }
   const AstRawString* raw_name() const { return name_; }
   VariableMode mode() const { return VariableModeField::decode(bit_field_); }
   void set_mode(VariableMode mode) {
@@ -89,7 +90,10 @@ class Variable final : public ZoneObject {
   }
   void SetMaybeAssigned() {
     if (mode() == VariableMode::kConst) return;
-
+    // Private names are only initialized once by us.
+    if (name_->IsPrivateName()) {
+      return;
+    }
     // If this variable is dynamically shadowing another variable, then that
     // variable could also be assigned (in the non-shadowing case).
     if (has_local_if_not_shadowed()) {
@@ -121,8 +125,9 @@ class Variable final : public ZoneObject {
   bool IsLookupSlot() const { return location() == VariableLocation::LOOKUP; }
   bool IsGlobalObjectProperty() const;
 
-  // True for 'let' variables declared in the script scope of a REPL script.
-  bool IsReplGlobalLet() const;
+  // True for 'let' and 'const' variables declared in the script scope of a REPL
+  // script.
+  bool IsReplGlobal() const;
 
   bool is_dynamic() const { return IsDynamicVariableMode(mode()); }
 

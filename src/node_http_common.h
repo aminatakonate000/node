@@ -270,7 +270,7 @@ class NgHeaders {
   MaybeStackBuffer<char, 3000> buf_;
 };
 
-// The ng libraries (nghttp2 and nghttp3) each use nearly identical
+// The ng libraries use nearly identical
 // reference counted structures for retaining header name and value
 // information in memory until the application is done with it.
 // The NgRcBufPointer is an intelligent pointer capable of working
@@ -453,6 +453,17 @@ class NgRcBufPointer : public MemoryRetainer {
   bool internalizable_ = false;
 };
 
+template <typename allocator_t>
+struct NgHeaderBase : public MemoryRetainer {
+  virtual v8::MaybeLocal<v8::String> GetName(allocator_t* allocator) const = 0;
+  virtual v8::MaybeLocal<v8::String> GetValue(allocator_t* allocator) const = 0;
+  virtual std::string name() const = 0;
+  virtual std::string value() const = 0;
+  virtual size_t length() const = 0;
+  virtual uint8_t flags() const = 0;
+  virtual std::string ToString() const;
+};
+
 // The ng libraries use nearly identical structs to represent
 // received http headers. The NgHeader class wraps those in a
 // consistent way and allows converting the name and value to
@@ -461,7 +472,7 @@ class NgRcBufPointer : public MemoryRetainer {
 // memory tracking, and implementation of static utility functions.
 // See Http2HeaderTraits in node_http2.h for an example.
 template <typename T>
-class NgHeader : public MemoryRetainer {
+class NgHeader final : public NgHeaderBase<typename T::allocator_t> {
  public:
   typedef typename T::rcbufferpointer_t rcbufferpointer_t;
   typedef typename T::rcbufferpointer_t::rcbuf_t rcbuf_t;
@@ -487,27 +498,20 @@ class NgHeader : public MemoryRetainer {
   // object to the v8 string. Once the v8 string is garbage collected,
   // the reference counter will be decremented.
 
-  inline v8::MaybeLocal<v8::String> GetName(allocator_t* allocator) const;
-  inline v8::MaybeLocal<v8::String> GetValue(allocator_t* allocator) const;
+  inline v8::MaybeLocal<v8::String> GetName(
+      allocator_t* allocator) const override;
+  inline v8::MaybeLocal<v8::String> GetValue(
+      allocator_t* allocator) const override;
 
-  inline std::string name() const;
-  inline std::string value() const;
-  inline size_t length() const;
+  inline std::string name() const override;
+  inline std::string value() const override;
+  inline size_t length() const override;
+  inline uint8_t flags() const override;
 
-  void MemoryInfo(MemoryTracker* tracker) const override {
-    tracker->TrackField("name", name_);
-    tracker->TrackField("value", value_);
-  }
+  void MemoryInfo(MemoryTracker* tracker) const override;
 
   SET_MEMORY_INFO_NAME(NgHeader)
   SET_SELF_SIZE(NgHeader)
-
-  std::string ToString() const {
-    std::string ret = name();
-    ret += " = ";
-    ret += value();
-    return ret;
-  }
 
  private:
   Environment* env_;

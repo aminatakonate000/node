@@ -120,14 +120,14 @@ const unixTests = [
   {
     send: '{a:1}',
     expect: '{ a: 1 }'
-  }
+  },
 ];
 
 const strictModeTests = [
   {
     send: 'ref = 1',
     expect: [/^Uncaught ReferenceError:\s/]
-  }
+  },
 ];
 
 const errorTests = [
@@ -242,7 +242,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -251,7 +251,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -260,7 +260,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -269,7 +269,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -278,7 +278,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -288,7 +288,7 @@ const errorTests = [
       kArrow,
       '',
       'Uncaught:',
-      /^SyntaxError: /
+      /^SyntaxError: /,
     ]
   },
   // Named functions can be used:
@@ -372,8 +372,8 @@ const errorTests = [
   {
     send: 'npm install foobar',
     expect: [
-      'npm should be run outside of the node repl, in your normal shell.',
-      '(Press Control-D to exit.)'
+      'npm should be run outside of the Node.js REPL, in your normal shell.',
+      '(Press Ctrl+D to exit.)',
     ]
   },
   {
@@ -411,7 +411,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   // Do not fail when a String is created with line continuation
@@ -453,8 +453,8 @@ const errorTests = [
       /\.load/,
       /\.save/,
       '',
-      'Press ^C to abort current expression, ^D to exit the repl',
-      /'thefourtheye'/
+      'Press Ctrl+C to abort current expression, Ctrl+D to exit the REPL',
+      /'thefourtheye'/,
     ]
   },
   // Check for wrapped objects.
@@ -468,7 +468,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -573,7 +573,7 @@ const errorTests = [
       /^    at .*/,
       "  code: 'MODULE_NOT_FOUND',",
       "  requireStack: [ '<repl>' ]",
-      '}'
+      '}',
     ]
   },
   // REPL should handle quotes within regexp literal in multiline mode
@@ -605,7 +605,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   // Mitigate https://github.com/nodejs/node/issues/548
@@ -624,7 +624,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   // Avoid emitting stack trace
@@ -634,7 +634,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
 
@@ -702,7 +702,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   // Bring back the repl to prompt
@@ -716,7 +716,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -725,7 +725,7 @@ const errorTests = [
       '... ... {',
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -734,7 +734,7 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
     ]
   },
   {
@@ -751,7 +751,40 @@ const errorTests = [
       kSource,
       kArrow,
       '',
-      /^Uncaught SyntaxError: /
+      /^Uncaught SyntaxError: /,
+    ]
+  },
+  {
+    send: 'console',
+    expect: [
+      'Object [console] {',
+      '  log: [Function: log],',
+      '  warn: [Function: warn],',
+      '  dir: [Function: dir],',
+      '  time: [Function: time],',
+      '  timeEnd: [Function: timeEnd],',
+      '  timeLog: [Function: timeLog],',
+      '  trace: [Function: trace],',
+      '  assert: [Function: assert],',
+      '  clear: [Function: clear],',
+      '  count: [Function: count],',
+      '  countReset: [Function: countReset],',
+      '  group: [Function: group],',
+      '  groupEnd: [Function: groupEnd],',
+      '  table: [Function: table],',
+      /  debug: \[Function: (debug|log)],/,
+      /  info: \[Function: (info|log)],/,
+      /  dirxml: \[Function: (dirxml|log)],/,
+      /  error: \[Function: (error|warn)],/,
+      /  groupCollapsed: \[Function: (groupCollapsed|group)],/,
+      /  Console: \[Function: Console],?/,
+      ...process.features.inspector ? [
+        '  profile: [Function: profile],',
+        '  profileEnd: [Function: profileEnd],',
+        '  timeStamp: [Function: timeStamp],',
+        '  context: [Function: context]',
+      ] : [],
+      '}',
     ]
   },
 ];
@@ -772,7 +805,17 @@ const tcpTests = [
   {
     send: `require(${JSON.stringify(moduleFilename)}).number`,
     expect: '42'
-  }
+  },
+  {
+    send: 'import comeOn from \'fhqwhgads\'',
+    expect: [
+      kSource,
+      kArrow,
+      '',
+      'Uncaught:',
+      /^SyntaxError: .* dynamic import/,
+    ]
+  },
 ];
 
 (async function() {
@@ -794,7 +837,7 @@ const tcpTests = [
     socket.end();
   }
   common.allowGlobals(...Object.values(global));
-})();
+})().then(common.mustCall());
 
 function startTCPRepl() {
   let resolveSocket, resolveReplServer;
@@ -828,7 +871,7 @@ function startTCPRepl() {
 
   return Promise.all([
     new Promise((resolve) => resolveSocket = resolve),
-    new Promise((resolve) => resolveReplServer = resolve)
+    new Promise((resolve) => resolveReplServer = resolve),
   ]);
 }
 
@@ -873,7 +916,7 @@ function startUnixRepl() {
 
   return Promise.all([
     new Promise((resolve) => resolveSocket = resolve),
-    new Promise((resolve) => resolveReplServer = resolve)
+    new Promise((resolve) => resolveReplServer = resolve),
   ]);
 }
 
@@ -883,7 +926,7 @@ function event(ee, expected) {
       const data = inspect(expected, { compact: false });
       const msg = `The REPL did not reply as expected for:\n\n${data}`;
       reject(new Error(msg));
-    }, common.platformTimeout(1000));
+    }, common.platformTimeout(9999));
     ee.once('data', common.mustCall((...args) => {
       clearTimeout(timeout);
       resolve(...args);

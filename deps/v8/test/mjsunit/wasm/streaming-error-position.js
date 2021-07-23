@@ -390,10 +390,10 @@ function testErrorPosition(bytes, pos, message) {
       1,                      // number of types
       kWasmFunctionTypeForm,  // type
       1,                      // number of parameter
-      0x7b,                   // invalid type
+      kWasmVoid,              // invalid type
       0                       // number of returns
   ]);
 
   let pos = bytes.length - 1 - 1;
-  testErrorPositionAsyncOnly(bytes, pos, 'invalid local type');
+  testErrorPositionAsyncOnly(bytes, pos, 'invalid value type');
 })();

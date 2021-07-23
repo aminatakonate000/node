@@ -5,7 +5,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 
 const asyncLocalStorage = new AsyncLocalStorage();
 
-asyncLocalStorage.runSyncAndReturn(new Map(), () => {
+asyncLocalStorage.run(new Map(), () => {
   asyncLocalStorage.getStore().set('foo', 'bar');
   process.nextTick(() => {
     assert.strictEqual(asyncLocalStorage.getStore().get('foo'), 'bar');
@@ -24,8 +24,8 @@ asyncLocalStorage.runSyncAndReturn(new Map(), () => {
 
     process.nextTick(() => {
       assert.strictEqual(asyncLocalStorage.getStore(), undefined);
-      asyncLocalStorage.runSyncAndReturn(new Map(), () => {
-        assert.notStrictEqual(asyncLocalStorage.getStore(), undefined);
+      asyncLocalStorage.run(new Map().set('bar', 'foo'), () => {
+        assert.strictEqual(asyncLocalStorage.getStore().get('bar'), 'foo');
       });
     });
   });

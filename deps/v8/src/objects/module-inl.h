@@ -6,12 +6,12 @@
 #define V8_OBJECTS_MODULE_INL_H_
 
 #include "src/objects/module.h"
-#include "src/objects/source-text-module.h"
-#include "src/objects/synthetic-module.h"
-
 #include "src/objects/objects-inl.h"  // Needed for write barriers
 #include "src/objects/scope-info.h"
+#include "src/objects/source-text-module-inl.h"
+#include "src/objects/source-text-module.h"
 #include "src/objects/string-inl.h"
+#include "src/objects/synthetic-module.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -19,13 +19,13 @@
 namespace v8 {
 namespace internal {
 
+#include "torque-generated/src/objects/module-tq-inl.inc"
+
 OBJECT_CONSTRUCTORS_IMPL(Module, HeapObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(SourceTextModule)
-TQ_OBJECT_CONSTRUCTORS_IMPL(SourceTextModuleInfoEntry)
-TQ_OBJECT_CONSTRUCTORS_IMPL(SyntheticModule)
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSModuleNamespace)
 
 NEVER_READ_ONLY_SPACE_IMPL(Module)
+NEVER_READ_ONLY_SPACE_IMPL(ModuleRequest)
 NEVER_READ_ONLY_SPACE_IMPL(SourceTextModule)
 NEVER_READ_ONLY_SPACE_IMPL(SyntheticModule)
 
@@ -33,30 +33,25 @@ CAST_ACCESSOR(Module)
 ACCESSORS(Module, exports, ObjectHashTable, kExportsOffset)
 ACCESSORS(Module, module_namespace, HeapObject, kModuleNamespaceOffset)
 ACCESSORS(Module, exception, Object, kExceptionOffset)
+ACCESSORS(Module, top_level_capability, HeapObject, kTopLevelCapabilityOffset)
 SMI_ACCESSORS(Module, status, kStatusOffset)
 SMI_ACCESSORS(Module, hash, kHashOffset)
 
-TQ_SMI_ACCESSORS(SourceTextModule, dfs_index)
-TQ_SMI_ACCESSORS(SourceTextModule, dfs_ancestor_index)
-TQ_SMI_ACCESSORS(SourceTextModule, flags)
-BOOL_ACCESSORS(SourceTextModule, flags, async, kAsyncBit)
-BOOL_ACCESSORS(SourceTextModule, flags, async_evaluating, kAsyncEvaluatingBit)
-TQ_SMI_ACCESSORS(SourceTextModule, pending_async_dependencies)
+BOOL_ACCESSORS(SourceTextModule, flags, async, AsyncBit::kShift)
+BIT_FIELD_ACCESSORS(SourceTextModule, flags, async_evaluating_ordinal,
+                    SourceTextModule::AsyncEvaluatingOrdinalBits)
 ACCESSORS(SourceTextModule, async_parent_modules, ArrayList,
           kAsyncParentModulesOffset)
-ACCESSORS(SourceTextModule, top_level_capability, HeapObject,
-          kTopLevelCapabilityOffset)
+
+struct Module::Hash {
+  V8_INLINE size_t operator()(Module const& module) const {
+    return module.hash();
+  }
+};
 
 SourceTextModuleInfo SourceTextModule::info() const {
-  return status() == kErrored
-             ? SourceTextModuleInfo::cast(code())
-             : GetSharedFunctionInfo().scope_info().ModuleDescriptorInfo();
+  return GetSharedFunctionInfo().scope_info().ModuleDescriptorInfo();
 }
-
-TQ_SMI_ACCESSORS(SourceTextModuleInfoEntry, module_request)
-TQ_SMI_ACCESSORS(SourceTextModuleInfoEntry, cell_index)
-TQ_SMI_ACCESSORS(SourceTextModuleInfoEntry, beg_pos)
-TQ_SMI_ACCESSORS(SourceTextModuleInfoEntry, end_pos)
 
 OBJECT_CONSTRUCTORS_IMPL(SourceTextModuleInfo, FixedArray)
 CAST_ACCESSOR(SourceTextModuleInfo)
@@ -81,18 +76,13 @@ FixedArray SourceTextModuleInfo::namespace_imports() const {
   return FixedArray::cast(get(kNamespaceImportsIndex));
 }
 
-FixedArray SourceTextModuleInfo::module_request_positions() const {
-  return FixedArray::cast(get(kModuleRequestPositionsIndex));
-}
-
 #ifdef DEBUG
 bool SourceTextModuleInfo::Equals(SourceTextModuleInfo other) const {
   return regular_exports() == other.regular_exports() &&
          regular_imports() == other.regular_imports() &&
          special_exports() == other.special_exports() &&
          namespace_imports() == other.namespace_imports() &&
-         module_requests() == other.module_requests() &&
-         module_request_positions() == other.module_request_positions();
+         module_requests() == other.module_requests();
 }
 #endif
 
@@ -120,11 +110,22 @@ class UnorderedModuleSet
             ZoneAllocator<Handle<Module>>(zone)) {}
 };
 
+Handle<SourceTextModule> SourceTextModule::GetCycleRoot(
+    Isolate* isolate) const {
+  CHECK_GE(status(), kEvaluated);
+  DCHECK(!cycle_root().IsTheHole(isolate));
+  Handle<SourceTextModule> root(SourceTextModule::cast(cycle_root()), isolate);
+  return root;
+}
+
 void SourceTextModule::AddAsyncParentModule(Isolate* isolate,
-                                            Handle<SourceTextModule> module) {
+                                            Handle<SourceTextModule> module,
+                                            Handle<SourceTextModule> parent) {
+  Handle<ArrayList> async_parent_modules(module->async_parent_modules(),
+                                         isolate);
   Handle<ArrayList> new_array_list =
-      ArrayList::Add(isolate, handle(async_parent_modules(), isolate), module);
-  set_async_parent_modules(*new_array_list);
+      ArrayList::Add(isolate, async_parent_modules, parent);
+  module->set_async_parent_modules(*new_array_list);
 }
 
 Handle<SourceTextModule> SourceTextModule::GetAsyncParentModule(
@@ -136,6 +137,10 @@ Handle<SourceTextModule> SourceTextModule::GetAsyncParentModule(
 
 int SourceTextModule::AsyncParentModuleCount() {
   return async_parent_modules().Length();
+}
+
+bool SourceTextModule::IsAsyncEvaluating() const {
+  return async_evaluating_ordinal() >= kFirstAsyncEvaluatingOrdinal;
 }
 
 bool SourceTextModule::HasPendingAsyncDependencies() {

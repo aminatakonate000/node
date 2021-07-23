@@ -1,4 +1,3 @@
-/* eslint-disable node-core/require-common-first, node-core/required-modules */
 'use strict';
 const assert = require('assert');
 const fs = require('fs');
@@ -24,16 +23,16 @@ function findReports(pid, dir) {
   return results;
 }
 
-function validate(filepath) {
+function validate(filepath, fields) {
   const report = fs.readFileSync(filepath, 'utf8');
   if (process.report.compact) {
     const end = report.indexOf('\n');
     assert.strictEqual(end, report.length - 1);
   }
-  validateContent(JSON.parse(report));
+  validateContent(JSON.parse(report), fields);
 }
 
-function validateContent(report) {
+function validateContent(report, fields = []) {
   if (typeof report === 'string') {
     try {
       report = JSON.parse(report);
@@ -43,7 +42,7 @@ function validateContent(report) {
     }
   }
   try {
-    _validateContent(report);
+    _validateContent(report, fields);
   } catch (err) {
     try {
       err.stack += util.format('\n------\nFailing Report:\n%O', report);
@@ -52,12 +51,12 @@ function validateContent(report) {
   }
 }
 
-function _validateContent(report) {
+function _validateContent(report, fields = []) {
   const isWindows = process.platform === 'win32';
+  const isJavaScriptThreadReport = report.javascriptStack != null;
 
   // Verify that all sections are present as own properties of the report.
-  const sections = ['header', 'javascriptStack', 'nativeStack',
-                    'javascriptHeap', 'libuv', 'environmentVariables',
+  const sections = ['header', 'nativeStack', 'libuv', 'environmentVariables',
                     'sharedObjects', 'resourceUsage', 'workers'];
   if (!isWindows)
     sections.push('userLimits');
@@ -65,10 +64,33 @@ function _validateContent(report) {
   if (report.uvthreadResourceUsage)
     sections.push('uvthreadResourceUsage');
 
+  if (isJavaScriptThreadReport)
+    sections.push('javascriptStack', 'javascriptHeap');
+
   checkForUnknownFields(report, sections);
   sections.forEach((section) => {
     assert(report.hasOwnProperty(section));
     assert(typeof report[section] === 'object' && report[section] !== null);
+  });
+
+  fields.forEach((field) => {
+    function checkLoop(actual, rest, expect) {
+      actual = actual[rest.shift()];
+      if (rest.length === 0 && actual !== undefined) {
+        assert.strictEqual(actual, expect);
+      } else {
+        assert(actual);
+        checkLoop(actual, rest, expect);
+      }
+    }
+    let actual, expect;
+    if (Array.isArray(field)) {
+      [actual, expect] = field;
+    } else {
+      actual = field;
+      expect = undefined;
+    }
+    checkLoop(report, actual.split('.'), expect);
   });
 
   // Verify the format of the header section.
@@ -143,16 +165,6 @@ function _validateContent(report) {
   });
   assert.strictEqual(header.host, os.hostname());
 
-  // Verify the format of the javascriptStack section.
-  checkForUnknownFields(report.javascriptStack, ['message', 'stack']);
-  assert.strictEqual(typeof report.javascriptStack.message, 'string');
-  if (report.javascriptStack.stack !== undefined) {
-    assert(Array.isArray(report.javascriptStack.stack));
-    report.javascriptStack.stack.forEach((frame) => {
-      assert.strictEqual(typeof frame, 'string');
-    });
-  }
-
   // Verify the format of the nativeStack section.
   assert(Array.isArray(report.nativeStack));
   report.nativeStack.forEach((frame) => {
@@ -163,26 +175,41 @@ function _validateContent(report) {
     assert.strictEqual(typeof frame.symbol, 'string');
   });
 
-  // Verify the format of the javascriptHeap section.
-  const heap = report.javascriptHeap;
-  const jsHeapFields = ['totalMemory', 'totalCommittedMemory', 'usedMemory',
-                        'availableMemory', 'memoryLimit', 'heapSpaces'];
-  checkForUnknownFields(heap, jsHeapFields);
-  assert(Number.isSafeInteger(heap.totalMemory));
-  assert(Number.isSafeInteger(heap.totalCommittedMemory));
-  assert(Number.isSafeInteger(heap.usedMemory));
-  assert(Number.isSafeInteger(heap.availableMemory));
-  assert(Number.isSafeInteger(heap.memoryLimit));
-  assert(typeof heap.heapSpaces === 'object' && heap.heapSpaces !== null);
-  const heapSpaceFields = ['memorySize', 'committedMemory', 'capacity', 'used',
-                           'available'];
-  Object.keys(heap.heapSpaces).forEach((spaceName) => {
-    const space = heap.heapSpaces[spaceName];
-    checkForUnknownFields(space, heapSpaceFields);
-    heapSpaceFields.forEach((field) => {
-      assert(Number.isSafeInteger(space[field]));
+  if (isJavaScriptThreadReport) {
+    // Verify the format of the javascriptStack section.
+    checkForUnknownFields(report.javascriptStack,
+                          ['message', 'stack', 'errorProperties']);
+    assert.strictEqual(typeof report.javascriptStack.errorProperties,
+                       'object');
+    assert.strictEqual(typeof report.javascriptStack.message, 'string');
+    if (report.javascriptStack.stack !== undefined) {
+      assert(Array.isArray(report.javascriptStack.stack));
+      report.javascriptStack.stack.forEach((frame) => {
+        assert.strictEqual(typeof frame, 'string');
+      });
+    }
+
+    // Verify the format of the javascriptHeap section.
+    const heap = report.javascriptHeap;
+    const jsHeapFields = ['totalMemory', 'totalCommittedMemory', 'usedMemory',
+                          'availableMemory', 'memoryLimit', 'heapSpaces'];
+    checkForUnknownFields(heap, jsHeapFields);
+    assert(Number.isSafeInteger(heap.totalMemory));
+    assert(Number.isSafeInteger(heap.totalCommittedMemory));
+    assert(Number.isSafeInteger(heap.usedMemory));
+    assert(Number.isSafeInteger(heap.availableMemory));
+    assert(Number.isSafeInteger(heap.memoryLimit));
+    assert(typeof heap.heapSpaces === 'object' && heap.heapSpaces !== null);
+    const heapSpaceFields = ['memorySize', 'committedMemory', 'capacity',
+                             'used', 'available'];
+    Object.keys(heap.heapSpaces).forEach((spaceName) => {
+      const space = heap.heapSpaces[spaceName];
+      checkForUnknownFields(space, heapSpaceFields);
+      heapSpaceFields.forEach((field) => {
+        assert(Number.isSafeInteger(space[field]));
+      });
     });
-  });
+  }
 
   // Verify the format of the resourceUsage section.
   const usage = report.resourceUsage;
@@ -262,7 +289,7 @@ function _validateContent(report) {
 
   // Verify the format of the workers section.
   assert(Array.isArray(report.workers));
-  report.workers.forEach(_validateContent);
+  report.workers.forEach((worker) => _validateContent(worker));
 }
 
 function checkForUnknownFields(actual, expected) {

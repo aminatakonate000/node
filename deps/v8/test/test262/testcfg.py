@@ -44,26 +44,19 @@ from testrunner.outproc import test262
 
 # TODO(littledan): move the flag mapping into the status file
 FEATURE_FLAGS = {
-  'Intl.Segmenter': '--harmony-intl-segmenter',
   'Intl.DateTimeFormat-dayPeriod': '--harmony-intl-dateformat-day-period',
-  'Intl.DateTimeFormat-quarter': '--harmony-intl-dateformat-quarter',
-  'Intl.DateTimeFormat-fractionalSecondDigits': '--harmony-intl-dateformat-fractional-second-digits',
-  'Intl.DisplayNames': '--harmony-intl-displaynames',
-  'String.prototype.replaceAll': '--harmony_string_replaceall',
+  'Intl.Locale-info': '--harmony_intl_locale_info',
   'Symbol.prototype.description': '--harmony-symbol-description',
-  'export-star-as-namespace-from-module': '--harmony-namespace-exports',
-  'Promise.allSettled': '--harmony-promise-all-settled',
-  'FinalizationGroup': '--harmony-weak-refs',
-  'WeakRef': '--harmony-weak-refs',
+  'FinalizationRegistry': '--harmony-weak-refs-with-cleanup-some',
+  'WeakRef': '--harmony-weak-refs-with-cleanup-some',
   'host-gc-required': '--expose-gc-as=v8GC',
-  'optional-chaining': '--harmony-optional-chaining',
+  'IsHTMLDDA': '--allow-natives-syntax',
   'top-level-await': '--harmony-top-level-await',
   'regexp-match-indices': '--harmony-regexp-match-indices',
   # https://github.com/tc39/test262/pull/2395
   'regexp-named-groups': '--harmony-regexp-match-indices',
-  'class-methods-private': '--harmony-private-methods',
-  'class-static-methods-private': '--harmony-private-methods',
-  'coalesce-expression': '--harmony-nullish',
+  'error-cause': '--harmony-error-cause',
+  'import-assertions': '--harmony-import-assertions',
 }
 
 SKIPPED_FEATURES = set([])
@@ -206,6 +199,8 @@ class TestCase(testcase.D8TestCase):
         list(self.suite.harness) +
         ([os.path.join(self.suite.root, "harness-agent.js")]
          if self.__needs_harness_agent() else []) +
+        ([os.path.join(self.suite.root, "harness-ishtmldda.js")]
+         if "IsHTMLDDA" in self.test_record.get("features", []) else []) +
         ([os.path.join(self.suite.root, "harness-adapt-donotevaluate.js")]
          if self.fail_phase_only and not self._fail_phase_reverse else []) +
         self._get_includes() +
@@ -215,6 +210,7 @@ class TestCase(testcase.D8TestCase):
 
   def _get_suite_flags(self):
     return (
+        ["--ignore-unhandled-promises"] +
         (["--throws"] if "negative" in self.test_record else []) +
         (["--allow-natives-syntax"]
          if "detachArrayBuffer.js" in self.test_record.get("includes", [])

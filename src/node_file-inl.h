@@ -28,7 +28,7 @@ void FSContinuationData::MaybeSetFirstPath(const std::string& path) {
 }
 
 std::string FSContinuationData::PopPath() {
-  CHECK_GT(paths_.size(), 0);
+  CHECK(!paths_.empty());
   std::string path = std::move(paths_.back());
   paths_.pop_back();
   return path;
@@ -227,7 +227,7 @@ FSReqBase* GetReqWrap(const v8::FunctionCallbackInfo<v8::Value>& args,
     return Unwrap<FSReqBase>(value.As<v8::Object>());
   }
 
-  BindingData* binding_data = Unwrap<BindingData>(args.Data());
+  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
   Environment* env = binding_data->env();
   if (value->StrictEquals(env->fs_use_promises_symbol())) {
     if (use_bigint) {

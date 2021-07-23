@@ -8,11 +8,12 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
-#include <ostream>  // NOLINT
+#include <ostream>
 #include <streambuf>
 
 #include "include/v8config.h"
 #include "src/base/macros.h"
+#include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
 
 namespace v8 {
@@ -35,7 +36,7 @@ class V8_EXPORT_PRIVATE OFStreamBase : public std::streambuf {
 class V8_EXPORT_PRIVATE DbgStreamBuf : public std::streambuf {
  public:
   DbgStreamBuf();
-  ~DbgStreamBuf();
+  ~DbgStreamBuf() override;
 
  private:
   int sync() override;
@@ -47,7 +48,7 @@ class V8_EXPORT_PRIVATE DbgStreamBuf : public std::streambuf {
 class DbgStdoutStream : public std::ostream {
  public:
   DbgStdoutStream();
-  ~DbgStdoutStream() = default;
+  ~DbgStdoutStream() override = default;
 
  private:
   DbgStreamBuf streambuf_;
@@ -80,12 +81,20 @@ class StdoutStream : public std::ostream {
   StdoutStream() : std::ostream(&stream_) {}
 
  private:
+  static V8_EXPORT_PRIVATE base::RecursiveMutex* GetStdoutMutex();
+
   AndroidLogStream stream_;
+  base::RecursiveMutexGuard mutex_guard_{GetStdoutMutex()};
 };
 #else
 class StdoutStream : public OFStream {
  public:
   StdoutStream() : OFStream(stdout) {}
+
+ private:
+  static V8_EXPORT_PRIVATE base::RecursiveMutex* GetStdoutMutex();
+
+  base::RecursiveMutexGuard mutex_guard_{GetStdoutMutex()};
 };
 #endif
 
@@ -149,10 +158,10 @@ struct PrintIteratorRange {
 // Print any collection which can be iterated via std::begin and std::end.
 // {Iterator} is the common type of {std::begin} and {std::end} called on a
 // {const T&}. This function is only instantiable if that type exists.
-template <typename T, typename Iterator = typename std::common_type<
-                          decltype(std::begin(std::declval<const T&>())),
-                          decltype(std::end(std::declval<const T&>()))>::type>
-PrintIteratorRange<Iterator> PrintCollection(const T& collection) {
+template <typename T>
+auto PrintCollection(const T& collection) -> PrintIteratorRange<
+    typename std::common_type<decltype(std::begin(collection)),
+                              decltype(std::end(collection))>::type> {
   return {std::begin(collection), std::end(collection)};
 }
 

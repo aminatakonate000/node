@@ -162,7 +162,7 @@ class JSONEncoder : public ParserHandler {
         Emit("\\r");
       } else if (ch == '\t') {
         Emit("\\t");
-      } else if (ch >= 32 && ch <= 126) {
+      } else if (ch >= 32 && ch <= 127) {
         Emit(ch);
       } else {
         Emit("\\u");
@@ -193,7 +193,7 @@ class JSONEncoder : public ParserHandler {
         Emit("\\r");
       } else if (c == '\t') {
         Emit("\\t");
-      } else if (c >= 32 && c <= 126) {
+      } else if (c >= 32 && c <= 127) {
         Emit(c);
       } else if (c < 32) {
         Emit("\\u");
@@ -285,7 +285,22 @@ class JSONEncoder : public ParserHandler {
       Emit("null");
       return;
     }
+    // If |value| is a scalar, emit it as an int. Taken from json_writer.cc in
+    // Chromium.
+    if (value < static_cast<double>(std::numeric_limits<int64_t>::max()) &&
+        value >= std::numeric_limits<int64_t>::min() &&
+        std::floor(value) == value) {
+      Emit(std::to_string(static_cast<int64_t>(value)));
+      return;
+    }
     std::string str_value = json::platform::DToStr(value);
+    // The following is somewhat paranoid, but also taken from json_writer.cc
+    // in Chromium:
+    // Ensure that the number has a .0 if there's no decimal or 'e'.  This
+    // makes sure that when we read the JSON back, it's interpreted as a
+    // real rather than an int.
+    if (str_value.find_first_of(".eE") == std::string::npos)
+      str_value.append(".0");
 
     // DToStr may fail to emit a 0 before the decimal dot. E.g. this is
     // the case in base::NumberToString in Chromium (which is based on

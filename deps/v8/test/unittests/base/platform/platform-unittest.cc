@@ -83,5 +83,23 @@ TEST_F(ThreadLocalStorageTest, DoTest) {
   Join();
 }
 
+TEST(StackTest, GetStackStart) { EXPECT_NE(nullptr, Stack::GetStackStart()); }
+
+TEST(StackTest, GetCurrentStackPosition) {
+  EXPECT_NE(nullptr, Stack::GetCurrentStackPosition());
+}
+
+#if !V8_OS_FUCHSIA
+TEST(StackTest, StackVariableInBounds) {
+  void* dummy;
+  ASSERT_GT(static_cast<void*>(Stack::GetStackStart()),
+            Stack::GetCurrentStackPosition());
+  EXPECT_GT(static_cast<void*>(Stack::GetStackStart()),
+            Stack::GetRealStackAddressForSlot(&dummy));
+  EXPECT_LT(static_cast<void*>(Stack::GetCurrentStackPosition()),
+            Stack::GetRealStackAddressForSlot(&dummy));
+}
+#endif  // !V8_OS_FUCHSIA
+
 }  // namespace base
 }  // namespace v8

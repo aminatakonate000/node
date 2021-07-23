@@ -12,6 +12,8 @@ const path = require('path');
 const os = require('os');
 const util = require('util');
 
+common.skipIfDumbTerminal();
+
 const tmpdir = require('../common/tmpdir');
 tmpdir.refresh();
 
@@ -96,7 +98,7 @@ const tests = [
     expected: [
       prompt,
       '2', '1', '21\n', prompt, prompt,
-      "'", '4', '2', "'", "'42'\n", prompt, prompt
+      "'", '4', '2', "'", "'42'\n", prompt, prompt,
     ],
     clean: false
   },
@@ -126,7 +128,7 @@ const tests = [
       `${prompt}'you look fabulous today'`,
       prompt,
       `${prompt}'you look fabulous today'`,
-      prompt
+      prompt,
     ]
   },
   {
@@ -167,7 +169,7 @@ const tests = [
     env: {},
     test: [UP],
     expected: [prompt, homedirErr, prompt, replDisabled, prompt]
-  }
+  },
 ];
 const numtests = tests.length;
 

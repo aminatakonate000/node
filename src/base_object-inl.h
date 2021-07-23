@@ -28,14 +28,7 @@
 #include "env-inl.h"
 #include "util.h"
 
-#if (__GNUC__ >= 8) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-function-type"
-#endif
 #include "v8.h"
-#if (__GNUC__ >= 8) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
 namespace node {
 
@@ -90,7 +83,8 @@ v8::Local<v8::Object> BaseObject::object() const {
 v8::Local<v8::Object> BaseObject::object(v8::Isolate* isolate) const {
   v8::Local<v8::Object> handle = object();
 
-  DCHECK_EQ(handle->CreationContext()->GetIsolate(), isolate);
+  DCHECK_EQ(handle->GetCreationContext().ToLocalChecked()->GetIsolate(),
+            isolate);
   DCHECK_EQ(env()->isolate(), isolate);
 
   return handle;
@@ -146,6 +140,13 @@ void BaseObject::ClearWeak() {
   persistent_handle_.ClearWeak();
 }
 
+bool BaseObject::IsWeakOrDetached() const {
+  if (persistent_handle_.IsWeak()) return true;
+
+  if (!has_pointer_data()) return false;
+  const PointerData* pd = const_cast<BaseObject*>(this)->pointer_data();
+  return pd->wants_weak_jsobj || pd->is_detached;
+}
 
 v8::Local<v8::FunctionTemplate>
 BaseObject::MakeLazilyInitializedJSTemplate(Environment* env) {
@@ -156,6 +157,7 @@ BaseObject::MakeLazilyInitializedJSTemplate(Environment* env) {
   };
 
   v8::Local<v8::FunctionTemplate> t = env->NewFunctionTemplate(constructor);
+  t->Inherit(BaseObject::GetConstructorTemplate(env));
   t->InstanceTemplate()->SetInternalFieldCount(
       BaseObject::kInternalFieldCount);
   return t;
@@ -199,7 +201,7 @@ void BaseObject::decrease_refcount() {
   unsigned int new_refcount = --metadata->strong_ptr_count;
   if (new_refcount == 0) {
     if (metadata->is_detached) {
-      delete this;
+      OnGCCollect();
     } else if (metadata->wants_weak_jsobj && !persistent_handle_.IsEmpty()) {
       MakeWeak();
     }
@@ -217,20 +219,22 @@ BaseObject::PointerData*
 BaseObjectPtrImpl<T, kIsWeak>::pointer_data() const {
   if (kIsWeak) {
     return data_.pointer_data;
-  } else {
-    if (get_base_object() == nullptr) return nullptr;
-    return get_base_object()->pointer_data();
   }
+  if (get_base_object() == nullptr) {
+    return nullptr;
+  }
+  return get_base_object()->pointer_data();
 }
 
 template <typename T, bool kIsWeak>
 BaseObject* BaseObjectPtrImpl<T, kIsWeak>::get_base_object() const {
   if (kIsWeak) {
-    if (pointer_data() == nullptr) return nullptr;
+    if (pointer_data() == nullptr) {
+      return nullptr;
+    }
     return pointer_data()->self;
-  } else {
-    return data_.target;
   }
+  return data_.target;
 }
 
 template <typename T, bool kIsWeak>
@@ -333,6 +337,20 @@ T* BaseObjectPtrImpl<T, kIsWeak>::operator->() const {
 template <typename T, bool kIsWeak>
 BaseObjectPtrImpl<T, kIsWeak>::operator bool() const {
   return get() != nullptr;
+}
+
+template <typename T, bool kIsWeak>
+template <typename U, bool kW>
+bool BaseObjectPtrImpl<T, kIsWeak>::operator ==(
+    const BaseObjectPtrImpl<U, kW>& other) const {
+  return get() == other.get();
+}
+
+template <typename T, bool kIsWeak>
+template <typename U, bool kW>
+bool BaseObjectPtrImpl<T, kIsWeak>::operator !=(
+    const BaseObjectPtrImpl<U, kW>& other) const {
+  return get() != other.get();
 }
 
 template <typename T, typename... Args>

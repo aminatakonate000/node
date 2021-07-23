@@ -21,6 +21,7 @@
 #include "src/compiler/operator.h"
 #include "src/compiler/schedule.h"
 #include "src/compiler/simplified-operator.h"
+#include "src/compiler/state-values-utils.h"
 #include "src/compiler/type-cache.h"
 #include "src/utils/bit-vector.h"
 #include "src/utils/ostreams.h"
@@ -150,8 +151,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
 
   // If this node has any effect outputs, make sure that it is
   // consumed as an effect input somewhere else.
-  // TODO(mvstanton): support this kind of verification for WASM
-  // compiles, too.
+  // TODO(mvstanton): support this kind of verification for Wasm compiles, too.
   if (code_type != kWasm && node->op()->EffectOutputCount() > 0) {
     int effect_edges = 0;
     for (Edge edge : node->use_edges()) {
@@ -355,6 +355,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       break;
     case IrOpcode::kDeoptimizeIf:
     case IrOpcode::kDeoptimizeUnless:
+    case IrOpcode::kDynamicCheckMapsWithDeoptUnless:
       CheckNotTyped(node);
       break;
     case IrOpcode::kTrapIf:
@@ -387,14 +388,6 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       }
       CheckNotTyped(node);
       break;
-    case IrOpcode::kOsrNormalEntry:
-    case IrOpcode::kOsrLoopEntry:
-      // Osr entries take one control and effect.
-      CHECK_EQ(1, control_count);
-      CHECK_EQ(1, effect_count);
-      CHECK_EQ(2, input_count);
-      CheckNotTyped(node);
-      break;
 
     // Common operators
     // ----------------
@@ -403,16 +396,16 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CHECK_EQ(1, input_count);
       // Parameter has an input that produces enough values.
       int const index = ParameterIndexOf(node->op());
-      Node* const start = NodeProperties::GetValueInput(node, 0);
-      CHECK_EQ(IrOpcode::kStart, start->opcode());
+      StartNode start{NodeProperties::GetValueInput(node, 0)};
       // Currently, parameter indices start at -1 instead of 0.
       CHECK_LE(-1, index);
-      CHECK_LT(index + 1, start->op()->ValueOutputCount());
+      CHECK_LE(index, start.LastParameterIndex_MaybeNonStandardLayout());
       CheckTypeIs(node, Type::Any());
       break;
     }
     case IrOpcode::kInt32Constant:  // TODO(turbofan): rename Word32Constant?
     case IrOpcode::kInt64Constant:  // TODO(turbofan): rename Word64Constant?
+    case IrOpcode::kTaggedIndexConstant:
     case IrOpcode::kFloat32Constant:
     case IrOpcode::kFloat64Constant:
     case IrOpcode::kRelocatableInt32Constant:
@@ -489,8 +482,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       Node* control = NodeProperties::GetControlInput(node, 0);
       CHECK_EQ(effect_count, control->op()->ControlInputCount());
       CHECK_EQ(input_count, 1 + effect_count);
-      // If the control input is a Merge, then make sure that at least one
-      // of it's usages is non-phi.
+      // If the control input is a Merge, then make sure that at least one of
+      // its usages is non-phi.
       if (control->opcode() == IrOpcode::kMerge) {
         bool non_phi_use_found = false;
         for (Node* use : control->uses()) {
@@ -542,19 +535,38 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CHECK_EQ(0, control_count);
       CHECK_EQ(0, effect_count);
       CHECK_EQ(6, input_count);
-      // Check that the parameters and registers are kStateValues or
-      // kTypedStateValues.
-      for (int i = 0; i < 2; ++i) {
-        CHECK(NodeProperties::GetValueInput(node, i)->opcode() ==
-                  IrOpcode::kStateValues ||
-              NodeProperties::GetValueInput(node, i)->opcode() ==
-                  IrOpcode::kTypedStateValues);
+
+      FrameState state{node};
+      CHECK(state.parameters()->opcode() == IrOpcode::kStateValues ||
+            state.parameters()->opcode() == IrOpcode::kTypedStateValues);
+      CHECK(state.locals()->opcode() == IrOpcode::kStateValues ||
+            state.locals()->opcode() == IrOpcode::kTypedStateValues);
+
+      // Checks that the state input is empty for all but kInterpretedFunction
+      // frames, where it should have size one.
+      {
+        const FrameStateFunctionInfo* func_info =
+            state.frame_state_info().function_info();
+        CHECK_EQ(func_info->parameter_count(),
+                 StateValuesAccess(state.parameters()).size());
+        CHECK_EQ(func_info->local_count(),
+                 StateValuesAccess(state.locals()).size());
+
+        Node* accumulator = state.stack();
+        if (func_info->type() == FrameStateType::kUnoptimizedFunction) {
+          // The accumulator (InputAt(2)) cannot be kStateValues.
+          // It can be kTypedStateValues (to signal the type) and it can have
+          // other Node types including that of the optimized_out HeapConstant.
+          CHECK_NE(accumulator->opcode(), IrOpcode::kStateValues);
+          if (accumulator->opcode() == IrOpcode::kTypedStateValues) {
+            CHECK_EQ(1, StateValuesAccess(accumulator).size());
+          }
+        } else {
+          CHECK(accumulator->opcode() == IrOpcode::kTypedStateValues ||
+                accumulator->opcode() == IrOpcode::kStateValues);
+          CHECK_EQ(0, StateValuesAccess(accumulator).size());
+        }
       }
-      // The accumulator (InputAt(2)) cannot be kStateValues, but it can be
-      // kTypedStateValues (to signal the type). Once AST graph builder
-      // is removed, we should check this here. Until then, AST graph
-      // builder can generate expression stack as InputAt(2), which can
-      // still be kStateValues.
       break;
     }
     case IrOpcode::kObjectId:
@@ -706,6 +718,9 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kJSLoadNamed:
       CheckTypeIs(node, Type::Any());
       break;
+    case IrOpcode::kJSLoadNamedFromSuper:
+      CheckTypeIs(node, Type::Any());
+      break;
     case IrOpcode::kJSLoadGlobal:
       CheckTypeIs(node, Type::Any());
       CHECK(LoadGlobalParametersOf(node->op()).feedback().IsValid());
@@ -744,11 +759,16 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kTypeOf:
       CheckTypeIs(node, Type::InternalizedString());
       break;
+    case IrOpcode::kTierUpCheck:
+    case IrOpcode::kUpdateInterruptBudget:
+      CheckValueInputIs(node, 0, Type::Any());
+      CheckNotTyped(node);
+      break;
     case IrOpcode::kJSGetSuperConstructor:
       // We don't check the input for Type::Function because this_function can
       // be context-allocated.
       CheckValueInputIs(node, 0, Type::Any());
-      CheckTypeIs(node, Type::Callable());
+      CheckTypeIs(node, Type::NonInternal());
       break;
 
     case IrOpcode::kJSHasContextExtension:
@@ -802,6 +822,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       break;
     case IrOpcode::kJSStoreModule:
       CheckNotTyped(node);
+      break;
+
+    case IrOpcode::kJSGetImportMeta:
+      CheckTypeIs(node, Type::Any());
       break;
 
     case IrOpcode::kJSGeneratorStore:
@@ -930,8 +954,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kSpeculativeBigIntNegate:
       CheckTypeIs(node, Type::BigInt());
       break;
-    case IrOpcode::kBigIntAsUintN:
-      CheckValueInputIs(node, 0, Type::BigInt());
+    case IrOpcode::kSpeculativeBigIntAsUintN:
+      CheckValueInputIs(node, 0, Type::Any());
       CheckTypeIs(node, Type::BigInt());
       break;
     case IrOpcode::kBigIntAdd:
@@ -1202,11 +1226,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::SignedSmall());
       break;
     case IrOpcode::kArgumentsLength:
-      CheckValueInputIs(node, 0, Type::ExternalPointer());
+    case IrOpcode::kRestLength:
       CheckTypeIs(node, TypeCache::Get()->kArgumentsLengthType);
-      break;
-    case IrOpcode::kArgumentsFrame:
-      CheckTypeIs(node, Type::ExternalPointer());
       break;
     case IrOpcode::kNewDoubleElements:
     case IrOpcode::kNewSmiOrObjectElements:
@@ -1215,8 +1236,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::OtherInternal());
       break;
     case IrOpcode::kNewArgumentsElements:
-      CheckValueInputIs(node, 0, Type::ExternalPointer());
-      CheckValueInputIs(node, 1,
+      CheckValueInputIs(node, 0,
                         Type::Range(0.0, FixedArray::kMaxLength, zone));
       CheckTypeIs(node, Type::OtherInternal());
       break;
@@ -1394,6 +1414,11 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckValueInputIs(node, 0, Type::Unsigned32());
       CheckTypeIs(node, Type::Unsigned32());
       break;
+    case IrOpcode::kCheckClosure:
+      // Any -> Function
+      CheckValueInputIs(node, 0, Type::Any());
+      CheckTypeIs(node, Type::Function());
+      break;
     case IrOpcode::kCheckHeapObject:
       CheckValueInputIs(node, 0, Type::Any());
       break;
@@ -1406,6 +1431,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::InternalizedString());
       break;
     case IrOpcode::kCheckMaps:
+      CheckValueInputIs(node, 0, Type::Any());
+      CheckNotTyped(node);
+      break;
+    case IrOpcode::kDynamicCheckMaps:
       CheckValueInputIs(node, 0, Type::Any());
       CheckNotTyped(node);
       break;
@@ -1471,6 +1500,15 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kAssertType:
       break;
 
+    case IrOpcode::kVerifyType:
+      if (NodeProperties::IsTyped(node)) {
+        Node* input = NodeProperties::GetValueInput(node, 0);
+        DCHECK(NodeProperties::IsTyped(input));
+        CHECK(NodeProperties::GetType(node).Equals(
+            NodeProperties::GetType(input)));
+      }
+      break;
+
     case IrOpcode::kCheckFloat64Hole:
       CheckValueInputIs(node, 0, Type::NumberOrHole());
       CheckTypeIs(node, Type::NumberOrUndefined());
@@ -1505,7 +1543,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       // Object -> fieldtype
       // TODO(rossberg): activate once machine ops are typed.
       // CheckValueInputIs(node, 0, Type::Object());
-      // CheckTypeIs(node, FieldAccessOf(node->op()).type));
+      // CheckTypeIs(node, FieldAccessOf(node->op()).type);
       break;
     case IrOpcode::kLoadElement:
     case IrOpcode::kLoadStackArgument:
@@ -1515,7 +1553,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       // CheckTypeIs(node, ElementAccessOf(node->op()).type));
       break;
     case IrOpcode::kLoadFromObject:
-      // TODO(gsps): Can we check some types here?
+      CheckValueInputIs(node, 0, Type::Receiver());
       break;
     case IrOpcode::kLoadTypedElement:
       break;
@@ -1567,6 +1605,14 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kTypeGuard:
       CheckTypeIs(node, TypeGuardTypeOf(node->op()));
       break;
+    case IrOpcode::kFoldConstant:
+      if (typing == TYPED) {
+        Type type = NodeProperties::GetType(node);
+        CHECK(type.IsSingleton());
+        CHECK(type.Equals(NodeProperties::GetType(node->InputAt(0))));
+        CHECK(type.Equals(NodeProperties::GetType(node->InputAt(1))));
+      }
+      break;
     case IrOpcode::kDateNow:
       CHECK_EQ(0, value_count);
       CheckTypeIs(node, Type::Number());
@@ -1575,10 +1621,23 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckValueInputIs(node, 0, Type::Any());
       CheckTypeIs(node, Type::BigInt());
       break;
+    case IrOpcode::kFastApiCall:
+      CHECK_GE(value_count, 2);
+      CheckValueInputIs(node, 0, Type::ExternalPointer());  // callee
+      CheckValueInputIs(node, 1, Type::Any());              // receiver
+      break;
+#if V8_ENABLE_WEBASSEMBLY
+    case IrOpcode::kJSWasmCall:
+      CHECK_GE(value_count, 3);
+      CheckTypeIs(node, Type::Any());
+      CheckValueInputIs(node, 0, Type::Any());  // callee
+      break;
+#endif  // V8_ENABLE_WEBASSEMBLY
 
     // Machine operators
     // -----------------------
     case IrOpcode::kLoad:
+    case IrOpcode::kLoadImmutable:
     case IrOpcode::kPoisonedLoad:
     case IrOpcode::kProtectedLoad:
     case IrOpcode::kProtectedStore:
@@ -1590,6 +1649,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kWord32Shl:
     case IrOpcode::kWord32Shr:
     case IrOpcode::kWord32Sar:
+    case IrOpcode::kWord32Rol:
     case IrOpcode::kWord32Ror:
     case IrOpcode::kWord32Equal:
     case IrOpcode::kWord32Clz:
@@ -1604,10 +1664,15 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kWord64Shl:
     case IrOpcode::kWord64Shr:
     case IrOpcode::kWord64Sar:
+    case IrOpcode::kWord64Rol:
     case IrOpcode::kWord64Ror:
     case IrOpcode::kWord64Clz:
-    case IrOpcode::kWord64Popcnt:
     case IrOpcode::kWord64Ctz:
+    case IrOpcode::kWord64RolLowerable:
+    case IrOpcode::kWord64RorLowerable:
+    case IrOpcode::kWord64ClzLowerable:
+    case IrOpcode::kWord64CtzLowerable:
+    case IrOpcode::kWord64Popcnt:
     case IrOpcode::kWord64ReverseBits:
     case IrOpcode::kWord64ReverseBytes:
     case IrOpcode::kSimd128ReverseBytes:
@@ -1739,6 +1804,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kFloat64ExtractHighWord32:
     case IrOpcode::kFloat64InsertLowWord32:
     case IrOpcode::kFloat64InsertHighWord32:
+    case IrOpcode::kWord32Select:
+    case IrOpcode::kWord64Select:
+    case IrOpcode::kFloat32Select:
+    case IrOpcode::kFloat64Select:
     case IrOpcode::kInt32PairAdd:
     case IrOpcode::kInt32PairSub:
     case IrOpcode::kInt32PairMul:
@@ -1796,7 +1865,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       // TODO(rossberg): Check.
       break;
   }
-}  // NOLINT(readability/fn_size)
+}
 
 void Verifier::Run(Graph* graph, Typing typing, CheckInputs check_inputs,
                    CodeType code_type) {
@@ -1968,7 +2037,7 @@ void ScheduleVerifier::Run(Schedule* schedule) {
     ZoneQueue<BasicBlock*> queue(zone);
     queue.push(start);
     dominators[start->id().ToSize()] =
-        new (zone) BitVector(static_cast<int>(count), zone);
+        zone->New<BitVector>(static_cast<int>(count), zone);
     while (!queue.empty()) {
       BasicBlock* block = queue.front();
       queue.pop();
@@ -1984,7 +2053,7 @@ void ScheduleVerifier::Run(Schedule* schedule) {
 
         if (succ_doms == nullptr) {
           // First time visiting the node. S.doms = B U B.doms
-          succ_doms = new (zone) BitVector(static_cast<int>(count), zone);
+          succ_doms = zone->New<BitVector>(static_cast<int>(count), zone);
           succ_doms->CopyFrom(*block_doms);
           succ_doms->Add(block->id().ToInt());
           dominators[succ->id().ToSize()] = succ_doms;

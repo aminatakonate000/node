@@ -62,6 +62,12 @@
       }, {
         'is_component_build': 0,
       }],
+      ['OS == "win" or OS == "mac"', {
+        # Sets -DSYSTEM_INSTRUMENTATION. Enables OS-dependent event tracing
+        'v8_enable_system_instrumentation': 1,
+      }, {
+        'v8_enable_system_instrumentation': 0,
+      }],
     ],
     'is_debug%': 0,
 
@@ -72,11 +78,6 @@
 
     # Sets -DV8_ENABLE_FUTURE.
     'v8_enable_future%': 0,
-
-    # Lite mode disables a number of performance optimizations to reduce memory
-    # at the cost of performance.
-    # Sets --DV8_LITE_MODE.
-    'v8_enable_lite_mode%': 0,
 
     # Sets -DVERIFY_HEAP.
     'v8_enable_verify_heap%': 0,
@@ -126,7 +127,7 @@
 
     # Enable pointer compression (sets -dV8_COMPRESS_POINTERS).
     'v8_enable_pointer_compression%': 0,
-    'v8_enable_31bit_smis_on_64bit_arch%': 1,
+    'v8_enable_31bit_smis_on_64bit_arch%': 0,
 
     # Sets -dOBJECT_PRINT.
     'v8_enable_object_print%': 0,
@@ -142,12 +143,6 @@
 
     # Sets -dV8_TRACE_FEEDBACK_UPDATES.
     'v8_enable_trace_feedback_updates%': 0,
-
-    # Sets -dV8_CONCURRENT_MARKING
-    'v8_enable_concurrent_marking%': 1,
-
-    # Sets -dV8_ARRAY_BUFFER_EXTENSION
-    'v8_enable_array_buffer_extension%': 0,
 
     # Enables various testing features.
     'v8_enable_test_features%': 0,
@@ -171,10 +166,6 @@
     # Controls the threshold for on-heap/off-heap Typed Arrays.
     'v8_typed_array_max_size_in_heap%': 64,
 
-    # Temporary flag to allow embedders to update their microtasks scopes
-    # while rolling in a new version of V8.
-    'v8_check_microtasks_scopes_consistency%': 0,
-
     # Enable mitigations for executing untrusted code.
     'v8_untrusted_code_mitigations%': 1,
 
@@ -183,6 +174,15 @@
 
     # Enable lazy source positions by default.
     'v8_enable_lazy_source_positions%': 1,
+
+    # Enable third party HEAP library
+    'v8_enable_third_party_heap%': 0,
+
+    # Libaries used by third party heap
+    'v8_third_party_heap_libs%': [],
+
+    # Source code used by third party heap
+    'v8_third_party_heap_files%': [],
 
     # Disable write barriers when GCs are non-incremental and
     # heap has single generation.
@@ -196,11 +196,42 @@
     # Use switch-based dispatch if this is false.
     'v8_enable_regexp_interpreter_threaded_dispatch%': 1,
 
+    # Disable all snapshot compression.
+    'v8_enable_snapshot_compression%': 1,
+
+    # Enable control-flow integrity features, such as pointer authentication
+    # for ARM64.
+    'v8_control_flow_integrity%': 0,
+
+    # Enable V8 zone compression experimental feature.
+    # Sets -DV8_COMPRESS_ZONES.
+    'v8_enable_zone_compression%': 0,
+
+    # Experimental feature for collecting per-class zone memory stats.
+    # Requires use_rtti = true
+    'v8_enable_precise_zone_stats%': 0,
+
+    # Experimental feature for tracking constness of properties in non-global
+    # dictionaries. Enabling this also always keeps prototypes in dict mode,
+    # meaning that they are not switched to fast mode.
+    # Sets -DV8_DICT_PROPERTY_CONST_TRACKING
+    'v8_dict_property_const_tracking%': 0,
+
     # Variables from v8.gni
 
     # Enable ECMAScript Internationalization API. Enabling this feature will
     # add a dependency on the ICU library.
     'v8_enable_i18n_support%': 1,
+
+    # Lite mode disables a number of performance optimizations to reduce memory
+    # at the cost of performance.
+    # Sets --DV8_LITE_MODE.
+    'v8_enable_lite_mode%': 0,
+
+    # Include support for WebAssembly. If disabled, the 'WebAssembly' global
+    # will not be available, and embedder APIs to generate WebAssembly modules
+    # will fail.
+    'v8_enable_webassembly%': 1,
   },
 
   'target_defaults': {
@@ -221,10 +252,7 @@
         'defines': ['V8_ENABLE_FUTURE',],
       }],
       ['v8_enable_lite_mode==1', {
-        'defines': [
-          'V8_LITE_MODE',
-          'V8_JITLESS_MODE',
-        ],
+        'defines': ['V8_LITE_MODE',],
       }],
       ['v8_enable_gdbjit==1', {
         'defines': ['ENABLE_GDB_JIT_INTERFACE',],
@@ -237,6 +265,9 @@
       }],
       ['v8_enable_pointer_compression==1 or v8_enable_31bit_smis_on_64bit_arch==1', {
         'defines': ['V8_31BIT_SMIS_ON_64BIT_ARCH',],
+      }],
+      ['v8_enable_zone_compression==1', {
+        'defines': ['V8_COMPRESS_ZONES',],
       }],
       ['v8_enable_object_print==1', {
         'defines': ['OBJECT_PRINT',],
@@ -292,17 +323,11 @@
       ['v8_disable_write_barriers==1', {
         'defines': ['V8_DISABLE_WRITE_BARRIERS',],
       }],
-      ['v8_enable_concurrent_marking==1', {
-        'defines': ['V8_CONCURRENT_MARKING',],
-      }],
-      ['v8_enable_array_buffer_extension==1', {
-        'defines': ['V8_ARRAY_BUFFER_EXTENSION',],
+      ['v8_enable_third_party_heap==1', {
+        'defines': ['V8_ENABLE_THIRD_PARTY_HEAP',],
       }],
       ['v8_enable_lazy_source_positions==1', {
         'defines': ['V8_ENABLE_LAZY_SOURCE_POSITIONS',],
-      }],
-      ['v8_check_microtasks_scopes_consistency==1', {
-        'defines': ['V8_CHECK_MICROTASKS_SCOPES_CONSISTENCY',],
       }],
       ['v8_use_siphash==1', {
         'defines': ['V8_USE_SIPHASH',],
@@ -325,9 +350,26 @@
       ['v8_enable_regexp_interpreter_threaded_dispatch==1', {
         'defines': ['V8_ENABLE_REGEXP_INTERPRETER_THREADED_DISPATCH',],
       }],
+      ['v8_enable_snapshot_compression==1', {
+        'defines': ['V8_SNAPSHOT_COMPRESSION',],
+      }],
+      ['v8_control_flow_integrity==1', {
+        'defines': ['V8_ENABLE_CONTROL_FLOW_INTEGRITY',],
+      }],
+      ['v8_enable_precise_zone_stats==1', {
+        'defines': ['V8_ENABLE_PRECISE_ZONE_STATS',],
+      }],
+      ['v8_enable_system_instrumentation==1', {
+        'defines': ['V8_ENABLE_SYSTEM_INSTRUMENTATION',],
+      }],
+      ['v8_enable_webassembly==1', {
+        'defines': ['V8_ENABLE_WEBASSEMBLY',],
+      }],
+      ['v8_dict_property_const_tracking==1', {
+        'defines': ['V8_DICT_PROPERTY_CONST_TRACKING',],
+      }],
     ],  # conditions
     'defines': [
-      'V8_EMBEDDED_BUILTINS',
       'V8_GYP_BUILD',
       'V8_TYPED_ARRAY_MAX_SIZE_IN_HEAP=<(v8_typed_array_max_size_in_heap)',
     ],  # defines

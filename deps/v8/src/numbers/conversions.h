@@ -5,7 +5,9 @@
 #ifndef V8_NUMBERS_CONVERSIONS_H_
 #define V8_NUMBERS_CONVERSIONS_H_
 
+#include "src/base/export-template.h"
 #include "src/base/logging.h"
+#include "src/base/optional.h"
 #include "src/common/globals.h"
 #include "src/utils/vector.h"
 
@@ -99,8 +101,9 @@ MaybeHandle<BigInt> StringToBigInt(Isolate* isolate, Handle<String> string);
 //   0x -> hex
 //   0o -> octal
 //   0b -> binary
-V8_EXPORT_PRIVATE MaybeHandle<BigInt> BigIntLiteral(Isolate* isolate,
-                                                    const char* string);
+template <typename IsolateT>
+EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+MaybeHandle<BigInt> BigIntLiteral(IsolateT* isolate, const char* string);
 
 const int kDoubleToCStringMinBufferSize = 100;
 
@@ -157,6 +160,14 @@ inline uint64_t PositiveNumberToUint64(Object number);
 
 double StringToDouble(Isolate* isolate, Handle<String> string, int flags,
                       double empty_string_val = 0.0);
+
+// String to double helper without heap allocation.
+// Returns base::nullopt if the string is longer than
+// {max_length_for_conversion}. 23 was chosen because any representable double
+// can be represented using a string of length 23.
+V8_EXPORT_PRIVATE base::Optional<double> TryStringToDouble(
+    LocalIsolate* isolate, Handle<String> object,
+    int max_length_for_conversion = 23);
 
 inline bool TryNumberToSize(Object number, size_t* result);
 

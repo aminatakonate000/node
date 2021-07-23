@@ -2,6 +2,10 @@
 // this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !V8_ENABLE_WEBASSEMBLY
+#error This header should only be included if WebAssembly is enabled.
+#endif  // !V8_ENABLE_WEBASSEMBLY
+
 #ifndef V8_WASM_WASM_DEBUG_H_
 #define V8_WASM_WASM_DEBUG_H_
 
@@ -13,6 +17,7 @@
 #include "src/base/iterator.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
+#include "src/utils/vector.h"
 #include "src/wasm/value-type.h"
 
 namespace v8 {
@@ -20,15 +25,17 @@ namespace internal {
 
 template <typename T>
 class Handle;
-class JSObject;
-class WasmInstanceObject;
+class WasmFrame;
 
 namespace wasm {
 
 class DebugInfoImpl;
-class LocalNames;
+class IndirectNameMap;
 class NativeModule;
+class WasmCode;
 class WireBytesRef;
+class WasmValue;
+struct WasmFunction;
 
 // Side table storing information used to inspect Liftoff frames at runtime.
 // This table is only created on demand for debugging, so it is not optimized
@@ -37,71 +44,79 @@ class DebugSideTable {
  public:
   class Entry {
    public:
-    struct Constant {
+    enum Storage : int8_t { kConstant, kRegister, kStack };
+    struct Value {
       int index;
-      int32_t i32_const;
+      ValueType type;
+      Storage storage;
+      union {
+        int32_t i32_const;  // if kind == kConstant
+        int reg_code;       // if kind == kRegister
+        int stack_offset;   // if kind == kStack
+      };
+
+      bool operator==(const Value& other) const {
+        if (index != other.index) return false;
+        if (type != other.type) return false;
+        if (storage != other.storage) return false;
+        switch (storage) {
+          case kConstant:
+            return i32_const == other.i32_const;
+          case kRegister:
+            return reg_code == other.reg_code;
+          case kStack:
+            return stack_offset == other.stack_offset;
+        }
+      }
+      bool operator!=(const Value& other) const { return !(*this == other); }
+
+      bool is_constant() const { return storage == kConstant; }
+      bool is_register() const { return storage == kRegister; }
     };
 
-    Entry(int pc_offset, std::vector<ValueType> stack_types,
-          std::vector<int> stack_offsets, std::vector<Constant> constants)
+    Entry(int pc_offset, int stack_height, std::vector<Value> changed_values)
         : pc_offset_(pc_offset),
-          stack_types_(std::move(stack_types)),
-          stack_offsets_(std::move(stack_offsets)),
-          constants_(std::move(constants)) {
-      DCHECK(std::is_sorted(constants_.begin(), constants_.end(),
-                            ConstantIndexLess{}));
-      DCHECK_EQ(stack_types_.size(), stack_offsets_.size());
-    }
+          stack_height_(stack_height),
+          changed_values_(std::move(changed_values)) {}
 
     // Constructor for map lookups (only initializes the {pc_offset_}).
     explicit Entry(int pc_offset) : pc_offset_(pc_offset) {}
 
     int pc_offset() const { return pc_offset_; }
-    int stack_height() const { return static_cast<int>(stack_types_.size()); }
-    ValueType stack_type(int stack_index) const {
-      return stack_types_[stack_index];
+
+    // Stack height, including locals.
+    int stack_height() const { return stack_height_; }
+
+    Vector<const Value> changed_values() const {
+      return VectorOf(changed_values_);
     }
-    int stack_offset(int stack_index) const {
-      return stack_offsets_[stack_index];
+
+    const Value* FindChangedValue(int stack_index) const {
+      DCHECK_GT(stack_height_, stack_index);
+      auto it = std::lower_bound(
+          changed_values_.begin(), changed_values_.end(), stack_index,
+          [](const Value& changed_value, int stack_index) {
+            return changed_value.index < stack_index;
+          });
+      return it != changed_values_.end() && it->index == stack_index ? &*it
+                                                                     : nullptr;
     }
-    // {index} can point to a local or operand stack value.
-    bool IsConstant(int index) const {
-      return std::binary_search(constants_.begin(), constants_.end(),
-                                Constant{index, 0}, ConstantIndexLess{});
-    }
-    int32_t GetConstant(int index) const {
-      DCHECK(IsConstant(index));
-      auto it = std::lower_bound(constants_.begin(), constants_.end(),
-                                 Constant{index, 0}, ConstantIndexLess{});
-      DCHECK_NE(it, constants_.end());
-      DCHECK_EQ(it->index, index);
-      return it->i32_const;
-    }
+
+    void Print(std::ostream&) const;
 
    private:
-    struct ConstantIndexLess {
-      bool operator()(const Constant& a, const Constant& b) const {
-        return a.index < b.index;
-      }
-    };
-
     int pc_offset_;
-    // TODO(clemensb): Merge these vectors into one.
-    std::vector<ValueType> stack_types_;
-    std::vector<int> stack_offsets_;
-    std::vector<Constant> constants_;
+    int stack_height_;
+    // Only store differences from the last entry, to keep the table small.
+    std::vector<Value> changed_values_;
   };
 
   // Technically it would be fine to copy this class, but there should not be a
   // reason to do so, hence mark it move only.
   MOVE_ONLY_NO_DEFAULT_CONSTRUCTOR(DebugSideTable);
 
-  explicit DebugSideTable(std::vector<ValueType> local_types,
-                          std::vector<int> local_stack_offsets,
-                          std::vector<Entry> entries)
-      : local_types_(std::move(local_types)),
-        local_stack_offsets_(std::move(local_stack_offsets)),
-        entries_(std::move(entries)) {
+  explicit DebugSideTable(int num_locals, std::vector<Entry> entries)
+      : num_locals_(num_locals), entries_(std::move(entries)) {
     DCHECK(
         std::is_sorted(entries_.begin(), entries_.end(), EntryPositionLess{}));
   }
@@ -110,19 +125,32 @@ class DebugSideTable {
     auto it = std::lower_bound(entries_.begin(), entries_.end(),
                                Entry{pc_offset}, EntryPositionLess{});
     if (it == entries_.end() || it->pc_offset() != pc_offset) return nullptr;
+    DCHECK_LE(num_locals_, it->stack_height());
     return &*it;
+  }
+
+  const Entry::Value* FindValue(const Entry* entry, int stack_index) const {
+    while (true) {
+      if (auto* value = entry->FindChangedValue(stack_index)) {
+        // Check that the table was correctly minimized: If the previous stack
+        // also had an entry for {stack_index}, it must be different.
+        DCHECK(entry == &entries_.front() ||
+               (entry - 1)->stack_height() <= stack_index ||
+               *FindValue(entry - 1, stack_index) != *value);
+        return value;
+      }
+      DCHECK_NE(&entries_.front(), entry);
+      --entry;
+    }
   }
 
   auto entries() const {
     return base::make_iterator_range(entries_.begin(), entries_.end());
   }
 
-  size_t num_entries() const { return entries_.size(); }
-  int num_locals() const { return static_cast<int>(local_types_.size()); }
-  ValueType local_type(int index) const { return local_types_[index]; }
-  int local_stack_offset(int index) const {
-    return local_stack_offsets_[index];
-  }
+  int num_locals() const { return num_locals_; }
+
+  void Print(std::ostream&) const;
 
  private:
   struct EntryPositionLess {
@@ -131,27 +159,71 @@ class DebugSideTable {
     }
   };
 
-  std::vector<ValueType> local_types_;
-  std::vector<int32_t> local_stack_offsets_;
+  int num_locals_;
   std::vector<Entry> entries_;
 };
 
-// Get the global scope for a given instance. This will contain the wasm memory
-// (if the instance has a memory) and the values of all globals.
-Handle<JSObject> GetGlobalScopeObject(Handle<WasmInstanceObject>);
-
 // Debug info per NativeModule, created lazily on demand.
 // Implementation in {wasm-debug.cc} using PIMPL.
-class DebugInfo {
+class V8_EXPORT_PRIVATE DebugInfo {
  public:
   explicit DebugInfo(NativeModule*);
   ~DebugInfo();
 
-  Handle<JSObject> GetLocalScopeObject(Isolate*, Address pc, Address fp);
+  // For the frame inspection methods below:
+  // {fp} is the frame pointer of the Liftoff frame, {debug_break_fp} that of
+  // the {WasmDebugBreak} frame (if any).
+  int GetNumLocals(Address pc);
+  WasmValue GetLocalValue(int local, Address pc, Address fp,
+                          Address debug_break_fp, Isolate* isolate);
+  int GetStackDepth(Address pc);
 
+  const wasm::WasmFunction& GetFunctionAtAddress(Address pc);
+
+  WasmValue GetStackValue(int index, Address pc, Address fp,
+                          Address debug_break_fp, Isolate* isolate);
+
+  // Returns the name of the entity (with the given |index| and |kind|) derived
+  // from the exports table. If the entity is not exported, an empty reference
+  // will be returned instead.
+  WireBytesRef GetExportName(ImportExportKindCode kind, uint32_t index);
+
+  // Returns the module and field name of the entity (with the given |index|
+  // and |kind|) derived from the imports table. If the entity is not imported,
+  // a pair of empty references will be returned instead.
+  std::pair<WireBytesRef, WireBytesRef> GetImportName(ImportExportKindCode kind,
+                                                      uint32_t index);
+
+  WireBytesRef GetTypeName(int type_index);
   WireBytesRef GetLocalName(int func_index, int local_index);
+  WireBytesRef GetFieldName(int struct_index, int field_index);
 
-  void SetBreakpoint(int func_index, int offset);
+  void SetBreakpoint(int func_index, int offset, Isolate* current_isolate);
+
+  // Returns true if we stay inside the passed frame (or a called frame) after
+  // the step. False if the frame will return after the step.
+  bool PrepareStep(WasmFrame*);
+
+  void PrepareStepOutTo(WasmFrame*);
+
+  void ClearStepping(Isolate*);
+
+  // Remove stepping code from a single frame; this is a performance
+  // optimization only, hitting debug breaks while not stepping and not at a set
+  // breakpoint would be unobservable otherwise.
+  void ClearStepping(WasmFrame*);
+
+  bool IsStepping(WasmFrame*);
+
+  void RemoveBreakpoint(int func_index, int offset, Isolate* current_isolate);
+
+  void RemoveDebugSideTables(Vector<WasmCode* const>);
+
+  // Return the debug side table for the given code object, but only if it has
+  // already been created. This will never trigger generation of the table.
+  DebugSideTable* GetDebugSideTableIfExists(const WasmCode*) const;
+
+  void RemoveIsolate(Isolate*);
 
  private:
   std::unique_ptr<DebugInfoImpl> impl_;

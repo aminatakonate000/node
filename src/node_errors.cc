@@ -3,9 +3,10 @@
 
 #include "debug_utils-inl.h"
 #include "node_errors.h"
+#include "node_external_reference.h"
 #include "node_internals.h"
+#include "node_process-inl.h"
 #include "node_report.h"
-#include "node_process.h"
 #include "node_v8_platform-inl.h"
 #include "util-inl.h"
 
@@ -25,7 +26,6 @@ using v8::Local;
 using v8::Maybe;
 using v8::MaybeLocal;
 using v8::Message;
-using v8::Number;
 using v8::Object;
 using v8::ScriptOrigin;
 using v8::StackFrame;
@@ -56,9 +56,18 @@ static std::string GetErrorSource(Isolate* isolate,
   MaybeLocal<String> source_line_maybe = message->GetSourceLine(context);
   node::Utf8Value encoded_source(isolate, source_line_maybe.ToLocalChecked());
   std::string sourceline(*encoded_source, encoded_source.length());
+  *added_exception_line = false;
+
+  // If source maps have been enabled, the exception line will instead be
+  // added in the JavaScript context:
+  Environment* env = Environment::GetCurrent(isolate);
+  const bool has_source_map_url =
+      !message->GetScriptOrigin().SourceMapUrl().IsEmpty();
+  if (has_source_map_url && env != nullptr && env->source_maps_enabled()) {
+    return sourceline;
+  }
 
   if (sourceline.find("node-do-not-add-exception-line") != std::string::npos) {
-    *added_exception_line = false;
     return sourceline;
   }
 
@@ -89,8 +98,8 @@ static std::string GetErrorSource(Isolate* isolate,
   const char* filename_string = *filename;
   int linenum = message->GetLineNumber(context).FromJust();
 
-  int script_start = (linenum - origin.ResourceLineOffset()->Value()) == 1
-                         ? origin.ResourceColumnOffset()->Value()
+  int script_start = (linenum - origin.LineOffset()) == 1
+                         ? origin.ColumnOffset()
                          : 0;
   int start = message->GetStartColumn(context).FromMaybe(0);
   int end = message->GetEndColumn(context).FromMaybe(0);
@@ -105,6 +114,13 @@ static std::string GetErrorSource(Isolate* isolate,
                             linenum,
                             sourceline.c_str());
   CHECK_GT(buf.size(), 0);
+  *added_exception_line = true;
+
+  if (start > end ||
+      start < 0 ||
+      static_cast<size_t>(end) > sourceline.size()) {
+    return buf;
+  }
 
   constexpr int kUnderlineBufsize = 1020;
   char underline_buf[kUnderlineBufsize + 4];
@@ -127,7 +143,6 @@ static std::string GetErrorSource(Isolate* isolate,
   CHECK_LE(off, kUnderlineBufsize);
   underline_buf[off++] = '\n';
 
-  *added_exception_line = true;
   return buf + std::string(underline_buf, off);
 }
 
@@ -200,6 +215,12 @@ void AppendExceptionLine(Environment* env,
   Local<Object> err_obj;
   if (!er.IsEmpty() && er->IsObject()) {
     err_obj = er.As<Object>();
+    // If arrow_message is already set, skip.
+    auto maybe_value = err_obj->GetPrivate(env->context(),
+                                          env->arrow_message_private_symbol());
+    Local<Value> lvalue;
+    if (!maybe_value.ToLocal(&lvalue) || lvalue->IsString())
+      return;
   }
 
   bool added_exception_line = false;
@@ -375,8 +396,13 @@ static void ReportFatalException(Environment* env,
     }
 
     if (!env->options()->trace_uncaught) {
-      FPrintF(stderr, "(Use `node --trace-uncaught ...` to show "
-                      "where the exception was thrown)\n");
+      std::string argv0;
+      if (!env->argv().empty()) argv0 = env->argv()[0];
+      if (argv0.empty()) argv0 = "node";
+      FPrintF(stderr,
+              "(Use `%s --trace-uncaught ...` to show where the exception "
+              "was thrown)\n",
+              fs::Basename(argv0, ".exe"));
     }
   }
 
@@ -405,10 +431,19 @@ void OnFatalError(const char* location, const char* message) {
   }
 
   Isolate* isolate = Isolate::GetCurrent();
-  Environment* env = Environment::GetCurrent(isolate);
-  if (per_process::cli_options->report_on_fatalerror) {
+  Environment* env = nullptr;
+  if (isolate != nullptr) {
+    env = Environment::GetCurrent(isolate);
+  }
+  bool report_on_fatalerror;
+  {
+    Mutex::ScopedLock lock(node::per_process::cli_options_mutex);
+    report_on_fatalerror = per_process::cli_options->report_on_fatalerror;
+  }
+
+  if (report_on_fatalerror) {
     report::TriggerNodeReport(
-        isolate, env, message, "FatalError", "", Local<String>());
+        isolate, env, message, "FatalError", "", Local<Object>());
   }
 
   fflush(stderr);
@@ -791,6 +826,12 @@ void SetPrepareStackTraceCallback(const FunctionCallbackInfo<Value>& args) {
   env->set_prepare_stack_trace_callback(args[0].As<Function>());
 }
 
+static void SetSourceMapsEnabled(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  CHECK(args[0]->IsBoolean());
+  env->set_source_maps_enabled(args[0].As<Boolean>()->Value());
+}
+
 static void SetEnhanceStackForFatalException(
     const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
@@ -822,6 +863,14 @@ static void TriggerUncaughtException(const FunctionCallbackInfo<Value>& args) {
   errors::TriggerUncaughtException(isolate, exception, message, from_promise);
 }
 
+void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+  registry->Register(SetPrepareStackTraceCallback);
+  registry->Register(SetSourceMapsEnabled);
+  registry->Register(SetEnhanceStackForFatalException);
+  registry->Register(NoSideEffectsToString);
+  registry->Register(TriggerUncaughtException);
+}
+
 void Initialize(Local<Object> target,
                 Local<Value> unused,
                 Local<Context> context,
@@ -829,6 +878,7 @@ void Initialize(Local<Object> target,
   Environment* env = Environment::GetCurrent(context);
   env->SetMethod(
       target, "setPrepareStackTraceCallback", SetPrepareStackTraceCallback);
+  env->SetMethod(target, "setSourceMapsEnabled", SetSourceMapsEnabled);
   env->SetMethod(target,
                  "setEnhanceStackForFatalException",
                  SetEnhanceStackForFatalException);
@@ -914,7 +964,7 @@ void TriggerUncaughtException(Isolate* isolate,
     return;
   }
 
-  MaybeLocal<Value> handled;
+  MaybeLocal<Value> maybe_handled;
   if (env->can_call_into_js()) {
     // We do not expect the global uncaught exception itself to throw any more
     // exceptions. If it does, exit the current Node.js instance.
@@ -928,7 +978,7 @@ void TriggerUncaughtException(Isolate* isolate,
     Local<Value> argv[2] = { error,
                              Boolean::New(env->isolate(), from_promise) };
 
-    handled = fatal_exception_function.As<Function>()->Call(
+    maybe_handled = fatal_exception_function.As<Function>()->Call(
         env->context(), process_object, arraysize(argv), argv);
   }
 
@@ -936,7 +986,8 @@ void TriggerUncaughtException(Isolate* isolate,
   // instance so return to continue the exit routine.
   // TODO(joyeecheung): return a Maybe here to prevent the caller from
   // stepping on the exit.
-  if (handled.IsEmpty()) {
+  Local<Value> handled;
+  if (!maybe_handled.ToLocal(&handled)) {
     return;
   }
 
@@ -946,7 +997,7 @@ void TriggerUncaughtException(Isolate* isolate,
   // TODO(joyeecheung): This has been only checking that the return value is
   // exactly false. Investigate whether this can be turned to an "if true"
   // similar to how the worker global uncaught exception handler handles it.
-  if (!handled.ToLocalChecked()->IsFalse()) {
+  if (!handled->IsFalse()) {
     return;
   }
 
@@ -992,3 +1043,4 @@ void TriggerUncaughtException(Isolate* isolate, const v8::TryCatch& try_catch) {
 }  // namespace node
 
 NODE_MODULE_CONTEXT_AWARE_INTERNAL(errors, node::errors::Initialize)
+NODE_MODULE_EXTERNAL_REFERENCE(errors, node::errors::RegisterExternalReferences)
